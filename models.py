@@ -19,24 +19,28 @@ class Image:
 
 
 @dataclass
+class Caption:
+    text: str
+    caption_type: str
+    # "image" or "table"
+
+
+@dataclass
 class Header:
-    name: str
+    text: str
 
 
 @dataclass
 class Footer:
-    name: str
+    text: str
 
 
 @dataclass
 class DocumentModel:
 
-    paragraphs: List[Paragraph] = field(default_factory=list)
+    # Ordered document content
+    content: List = field(default_factory=list)
 
-    tables: List[Table] = field(default_factory=list)
-
-    images: List[Image] = field(default_factory=list)
-
+    # Headers & Footers
     headers: List[Header] = field(default_factory=list)
-
     footers: List[Footer] = field(default_factory=list)

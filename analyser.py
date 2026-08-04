@@ -62,6 +62,12 @@ class DocxAnalyzer:
 
             "section_breaks": 0,
 
+            "hyperlinks_external": 0,
+            "hyperlinks_internal": 0,
+            "cross_references": 0,
+            "bookmarks": 0,
+            "hyperlinks_plain_text": 0,
+
             "media_files": []
         }
 
@@ -277,6 +283,81 @@ class DocxAnalyzer:
                     ".//w:sectPr",
                     namespaces=NS
                 )
+            )
+
+            # --------------------------------------------------
+            # HYPERLINKS & INTERNAL REFERENCES
+            # --------------------------------------------------
+
+            import re
+
+            # structured w:hyperlink elements
+            report["hyperlinks_external"] = len(
+                root.xpath(
+                    ".//w:hyperlink[@r:id]",
+                    namespaces=NS
+                )
+            )
+
+            report["hyperlinks_internal"] = len(
+                root.xpath(
+                    ".//w:hyperlink[@w:anchor]",
+                    namespaces=NS
+                )
+            )
+
+            # field-code hyperlinks and cross-references via w:instrText
+            instr_texts = [
+                node.text.strip()
+                for node in root.xpath(
+                    ".//w:instrText",
+                    namespaces=NS
+                )
+                if node.text
+            ]
+
+            report["hyperlinks_external"] += sum(
+                1 for t in instr_texts
+                if re.search(r"\bHYPERLINK\b", t)
+                and r"\l" not in t
+            )
+
+            report["hyperlinks_internal"] += sum(
+                1 for t in instr_texts
+                if re.search(r"\bHYPERLINK\b", t)
+                and r"\l" in t
+            )
+
+            report["cross_references"] = sum(
+                1 for t in instr_texts
+                if re.search(r"\b(REF|PAGEREF)\b", t)
+            )
+
+            # exclude auto-generated bookmarks (Word prefix "_")
+            report["bookmarks"] = len(
+                [
+                    b
+                    for b in root.xpath(
+                        ".//w:bookmarkStart",
+                        namespaces=NS
+                    )
+                    if not b.get(
+                        "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}name",
+                        ""
+                    ).startswith("_")
+                ]
+            )
+
+            # plain-text URLs in w:t runs (not wrapped in w:hyperlink)
+            _url_re = re.compile(r"https?://\S+")
+
+            report["hyperlinks_plain_text"] = sum(
+                1
+                for node in root.xpath(
+                    ".//w:t[not(ancestor::w:hyperlink)]",
+                    namespaces=NS
+                )
+                if node.text and _url_re.search(node.text)
             )
 
         return report

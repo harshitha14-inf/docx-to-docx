@@ -1,5 +1,12 @@
 from docx import Document
 
+from models import (
+    Paragraph,
+    Table,
+    Image,
+    Caption
+)
+
 
 class Builder:
 
@@ -8,62 +15,107 @@ class Builder:
         doc = Document()
 
         # -------------------
-        # Paragraphs
+        # Headers
         # -------------------
 
-        for paragraph in model.paragraphs:
+        if model.headers:
 
-            doc.add_paragraph(
-                paragraph.text
+            section = doc.sections[0]
+
+            header = section.header
+
+            header.paragraphs[0].text = (
+                model.headers[0].text
             )
 
         # -------------------
-        # Tables
+        # Footers
         # -------------------
 
-        for table in model.tables:
+        if model.footers:
 
-            if not table.data:
-                continue
+            section = doc.sections[0]
 
-            rows = len(table.data)
+            footer = section.footer
 
-            cols = max(
-                len(row)
-                for row in table.data
+            footer.paragraphs[0].text = (
+                model.footers[0].text
             )
 
-            word_table = doc.add_table(
-                rows=rows,
-                cols=cols
-            )
-
-            for r, row_data in enumerate(table.data):
-
-                for c, value in enumerate(row_data):
-
-                    word_table.cell(
-                        r,
-                        c
-                    ).text = value
-
         # -------------------
-        # Images
+        # Main Content
         # -------------------
 
-        for image in model.images:
+        for item in model.content:
 
-            try:
+            # Paragraph
 
-                doc.add_picture(
-                    image.path
+            if isinstance(item, Paragraph):
+
+                doc.add_paragraph(
+                    item.text
                 )
 
-            except Exception as e:
+            # Caption
 
-                print(
-                    f"Could not add image "
-                    f"{image.name}: {e}"
+            elif isinstance(item, Caption):
+
+                p = doc.add_paragraph()
+
+                run = p.add_run(
+                    item.text
                 )
+
+                run.bold = True
+
+            # Table
+
+            elif isinstance(item, Table):
+
+                if not item.data:
+                    continue
+
+                rows = len(item.data)
+
+                cols = max(
+                    len(row)
+                    for row in item.data
+                )
+
+                table = doc.add_table(
+                    rows=rows,
+                    cols=cols
+                )
+
+                for r, row in enumerate(
+                    item.data
+                ):
+
+                    for c, value in enumerate(
+                        row
+                    ):
+
+                        table.cell(
+                            r,
+                            c
+                        ).text = value
+
+            # Image
+
+            elif isinstance(item, Image):
+
+                try:
+
+                    doc.add_picture(
+                        item.path
+                    )
+
+                except Exception as e:
+
+                    print(
+                        f"Could not add image "
+                        f"{item.name}: {e}"
+                    )
 
         doc.save(out_file)
+

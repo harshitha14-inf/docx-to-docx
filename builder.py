@@ -95,6 +95,8 @@ class Builder:
         num_id_remap = {}
         merged_numbering_bytes = None
         settings_bytes = None
+        styles_bytes = None
+        bookmark_id_state = None
 
         if template_used:
             merged_rels_bytes, id_remap = self._compute_merged_relationships(
@@ -106,6 +108,8 @@ class Builder:
                 source_docx_path=model.source_docx_path,
             )
             settings_bytes = self._build_settings_with_update_fields(base_docx_path)
+            styles_bytes = self._build_styles_with_caption_formatting(base_docx_path)
+            bookmark_id_state = self._build_bookmark_id_remap_state(base_docx_path)
 
         resolved_cover_metadata = self._resolve_cover_metadata(
             model,
@@ -149,6 +153,7 @@ class Builder:
             style_alias_map=style_alias_map,
             id_remap=id_remap,
             num_id_remap=num_id_remap,
+            bookmark_id_state=bookmark_id_state,
             cover_content=cover_content,
             content_width_twips=content_width_twips,
         )
@@ -191,6 +196,13 @@ class Builder:
                             and settings_bytes is not None
                         ):
                             data = settings_bytes
+
+                        elif (
+                            template_used
+                            and info.filename == "word/styles.xml"
+                            and styles_bytes is not None
+                        ):
+                            data = styles_bytes
 
                         elif (
                             template_used
@@ -379,6 +391,69 @@ class Builder:
                     node.attrib[attr_name] = mapped
 
     # ------------------------------------------------------------------
+    # Bookmark-ID collision-safe merge
+    # ------------------------------------------------------------------
+    #
+    # w:bookmarkStart/@w:id must be unique across the whole package (body +
+    # headers/footers). Both the template and any source document
+    # independently number their own bookmarks starting at/near 0, so
+    # appending source content into the template body without remapping
+    # produces massive id collisions (Word flags the package as corrupted
+    # and silently repairs/drops content on open).
+
+    BOOKMARK_SCAN_PARTS_PREFIXES = ("word/document.xml", "word/header", "word/footer")
+
+    def _compute_template_max_bookmark_id(self, base_docx_path):
+
+        max_id = -1
+
+        with ZipFile(base_docx_path, "r") as archive:
+            for name in archive.namelist():
+                if not name.startswith(self.BOOKMARK_SCAN_PARTS_PREFIXES):
+                    continue
+                if not name.endswith(".xml"):
+                    continue
+
+                root = etree.fromstring(archive.read(name))
+
+                for node in root.iter(f"{W_NS}bookmarkStart"):
+                    value = node.get(f"{W_NS}id")
+                    if value is not None and value.lstrip("-").isdigit():
+                        max_id = max(max_id, int(value))
+
+        return max_id
+
+    def _build_bookmark_id_remap_state(self, base_docx_path):
+
+        return {
+            "next_id": self._compute_template_max_bookmark_id(base_docx_path) + 1,
+            "map": {},
+        }
+
+    def _remap_bookmark_ids(self, element, bookmark_id_state):
+
+        if not bookmark_id_state:
+            return
+
+        id_map = bookmark_id_state["map"]
+
+        for tag in ("bookmarkStart", "bookmarkEnd"):
+            for node in element.iter(f"{W_NS}{tag}"):
+                old_id = node.get(f"{W_NS}id")
+
+                if old_id is None:
+                    continue
+
+                new_id = id_map.get(old_id)
+
+                if new_id is None:
+                    new_id = str(bookmark_id_state["next_id"])
+                    id_map[old_id] = new_id
+                    bookmark_id_state["next_id"] += 1
+
+                node.set(f"{W_NS}id", new_id)
+
+    # ------------------------------------------------------------------
     # Numbering-ID collision-safe merge (heading chapter numbers + lists)
     # ------------------------------------------------------------------
 
@@ -559,6 +634,67 @@ class Builder:
             anchor.addprevious(update_fields)
         else:
             root.insert(0, update_fields)
+
+        return etree.tostring(
+            root,
+            encoding="UTF-8",
+            xml_declaration=True,
+            standalone=True,
+        )
+
+    # ------------------------------------------------------------------
+    # Fix the template's built-in "Caption" style: Word's generic default
+    # is italic + theme-colored + not bold. Corporate captions must be
+    # bold, black, and inherit the document's default (body) font.
+    # ------------------------------------------------------------------
+
+    CAPTION_STYLE_ID = "Caption"
+
+    def _build_styles_with_caption_formatting(self, base_docx_path):
+
+        styles_part = "word/styles.xml"
+
+        with ZipFile(base_docx_path, "r") as archive:
+            if styles_part not in archive.namelist():
+                return None
+            styles_xml = archive.read(styles_part)
+
+        root = etree.fromstring(styles_xml)
+
+        style = root.find(
+            f"w:style[@w:styleId='{self.CAPTION_STYLE_ID}']",
+            namespaces=NS,
+        )
+
+        if style is None:
+            return None
+
+        rpr = style.find("w:rPr", namespaces=NS)
+
+        if rpr is None:
+            rpr = etree.SubElement(style, f"{W_NS}rPr")
+
+        changed = False
+
+        for tag in ("i", "iCs", "color"):
+            node = rpr.find(f"w:{tag}", namespaces=NS)
+            if node is not None:
+                rpr.remove(node)
+                changed = True
+
+        if rpr.find("w:b", namespaces=NS) is None:
+            b_el = etree.Element(f"{W_NS}b")
+            rpr.insert(0, b_el)
+            changed = True
+
+        if rpr.find("w:bCs", namespaces=NS) is None:
+            bcs_el = etree.Element(f"{W_NS}bCs")
+            b_index = list(rpr).index(rpr.find("w:b", namespaces=NS))
+            rpr.insert(b_index + 1, bcs_el)
+            changed = True
+
+        if not changed:
+            return styles_xml
 
         return etree.tostring(
             root,
@@ -899,11 +1035,15 @@ class Builder:
             return None
 
         return [
-            self._clone_paragraph_with_text(template_paragraph, text)
-            for text in texts
+            self._clone_paragraph_with_text(
+                template_paragraph,
+                text,
+                strip_bookmarks=(index > 0),
+            )
+            for index, text in enumerate(texts)
         ]
 
-    def _clone_paragraph_with_text(self, template_paragraph, text):
+    def _clone_paragraph_with_text(self, template_paragraph, text, strip_bookmarks=False):
 
         clone = deepcopy(template_paragraph)
 
@@ -915,6 +1055,11 @@ class Builder:
 
         for hyperlink in clone.findall(f"{W_NS}hyperlink"):
             clone.remove(hyperlink)
+
+        if strip_bookmarks:
+            for tag in ("bookmarkStart", "bookmarkEnd"):
+                for node in clone.findall(f"{W_NS}{tag}"):
+                    clone.remove(node)
 
         clone.append(self._make_text_run(template_rpr, text))
 
@@ -1124,6 +1269,7 @@ class Builder:
         style_alias_map,
         id_remap,
         num_id_remap=None,
+        bookmark_id_state=None,
         cover_content=None,
         content_width_twips=None,
     ):
@@ -1151,6 +1297,7 @@ class Builder:
                 ):
                     self._remap_relationship_ids(element, id_remap)
                     self._remap_numbering_ids(element, num_id_remap or {})
+                    self._remap_bookmark_ids(element, bookmark_id_state)
                     body.append(element)
 
         if sections is not None and content_idx is not None:

@@ -39,6 +39,8 @@ TEMPLATE_OWNED_REL_TYPES = {
 
 CAPTION_NUMBER_RE = re.compile(r"^(figure|table)\s+\d+(\.\d+)*\s*", re.IGNORECASE)
 
+HEADING_STYLE_IDS = {"Heading1", "Heading2", "Heading3", "Heading4"}
+
 CANDIDATE_TABLE_STYLE_KEYS = [
     "infineon standard",
     "infineonstandard",
@@ -90,12 +92,20 @@ class Builder:
 
         id_remap = {}
         merged_rels_bytes = None
+        num_id_remap = {}
+        merged_numbering_bytes = None
+        settings_bytes = None
 
         if template_used:
             merged_rels_bytes, id_remap = self._compute_merged_relationships(
                 base_docx_path=base_docx_path,
                 source_docx_path=model.source_docx_path,
             )
+            merged_numbering_bytes, num_id_remap = self._compute_merged_numbering(
+                base_docx_path=base_docx_path,
+                source_docx_path=model.source_docx_path,
+            )
+            settings_bytes = self._build_settings_with_update_fields(base_docx_path)
 
         resolved_cover_metadata = self._resolve_cover_metadata(
             model,
@@ -109,6 +119,24 @@ class Builder:
             first_heading_text,
         )
 
+        custom_props_bytes = None
+        core_props_bytes = None
+
+        if template_used:
+            # Word recalculates DOCPROPERTY fields from docProps/custom.xml and
+            # docProps/core.xml on open (now that updateFields=true is set) - the
+            # underlying properties must be patched too, or Word will revert our
+            # cached field text back to the template's placeholder values
+            # (e.g. ConfidentialityMarking="restricted", Title="Document title").
+            custom_props_bytes = self._build_custom_properties_xml(
+                base_docx_path,
+                resolved_cover_metadata,
+            )
+            core_props_bytes = self._build_core_properties_xml(
+                model.source_docx_path,
+                resolved_cover_metadata.get("Title"),
+            )
+
         cover_content = self._extract_cover_content(model)
 
         content_width_twips = self._get_template_content_width_twips(base_docx_path)
@@ -120,6 +148,7 @@ class Builder:
             style_mapper=active_style_mapper,
             style_alias_map=style_alias_map,
             id_remap=id_remap,
+            num_id_remap=num_id_remap,
             cover_content=cover_content,
             content_width_twips=content_width_twips,
         )
@@ -148,6 +177,34 @@ class Builder:
 
                         elif template_used and info.filename == "word/_rels/document.xml.rels":
                             data = merged_rels_bytes
+
+                        elif (
+                            template_used
+                            and info.filename == "word/numbering.xml"
+                            and merged_numbering_bytes is not None
+                        ):
+                            data = merged_numbering_bytes
+
+                        elif (
+                            template_used
+                            and info.filename == "word/settings.xml"
+                            and settings_bytes is not None
+                        ):
+                            data = settings_bytes
+
+                        elif (
+                            template_used
+                            and info.filename == "docProps/custom.xml"
+                            and custom_props_bytes is not None
+                        ):
+                            data = custom_props_bytes
+
+                        elif (
+                            template_used
+                            and info.filename == "docProps/core.xml"
+                            and core_props_bytes is not None
+                        ):
+                            data = core_props_bytes
 
                         elif (
                             template_used
@@ -320,6 +377,274 @@ class Builder:
 
                 if mapped and mapped != value:
                     node.attrib[attr_name] = mapped
+
+    # ------------------------------------------------------------------
+    # Numbering-ID collision-safe merge (heading chapter numbers + lists)
+    # ------------------------------------------------------------------
+
+    def _compute_merged_numbering(self, base_docx_path, source_docx_path):
+
+        numbering_part = "word/numbering.xml"
+
+        with ZipFile(base_docx_path, "r") as archive:
+            if numbering_part not in archive.namelist():
+                return None, {}
+            template_numbering_xml = archive.read(numbering_part)
+
+        with ZipFile(source_docx_path, "r") as archive:
+            if numbering_part not in archive.namelist():
+                return template_numbering_xml, {}
+            source_numbering_xml = archive.read(numbering_part)
+
+        template_root = etree.fromstring(template_numbering_xml)
+        source_root = etree.fromstring(source_numbering_xml)
+
+        other_nodes = []
+        abstract_by_id = {}
+        num_by_id = {}
+        ordered_abstract_ids = []
+        ordered_num_ids = []
+
+        for node in template_root:
+            local_name = etree.QName(node).localname
+
+            if local_name == "abstractNum":
+                abstract_id = node.get(f"{W_NS}abstractNumId")
+                abstract_by_id[abstract_id] = deepcopy(node)
+                ordered_abstract_ids.append(abstract_id)
+            elif local_name == "num":
+                num_id = node.get(f"{W_NS}numId")
+                num_by_id[num_id] = deepcopy(node)
+                ordered_num_ids.append(num_id)
+            else:
+                # e.g. w:numPicBullet - preserve template-only, rare to need source's own.
+                other_nodes.append(deepcopy(node))
+
+        used_abstract_numbers = set()
+        used_num_numbers = set()
+
+        for node in list(template_root) + list(source_root):
+            local_name = etree.QName(node).localname
+
+            if local_name == "abstractNum":
+                try:
+                    used_abstract_numbers.add(int(node.get(f"{W_NS}abstractNumId")))
+                except (TypeError, ValueError):
+                    pass
+            elif local_name == "num":
+                try:
+                    used_num_numbers.add(int(node.get(f"{W_NS}numId")))
+                except (TypeError, ValueError):
+                    pass
+
+        next_abstract_number = (max(used_abstract_numbers) + 1) if used_abstract_numbers else 0
+        next_num_number = (max(used_num_numbers) + 1) if used_num_numbers else 1
+
+        abstract_id_remap = {}
+        num_id_remap = {}
+
+        for node in source_root:
+
+            if etree.QName(node).localname != "abstractNum":
+                continue
+
+            old_id = node.get(f"{W_NS}abstractNumId")
+
+            if old_id is None:
+                continue
+
+            new_node = deepcopy(node)
+
+            if old_id in abstract_by_id:
+                new_id = str(next_abstract_number)
+                next_abstract_number += 1
+                new_node.set(f"{W_NS}abstractNumId", new_id)
+                abstract_id_remap[old_id] = new_id
+            else:
+                abstract_id_remap[old_id] = old_id
+
+            abstract_by_id[abstract_id_remap[old_id]] = new_node
+            ordered_abstract_ids.append(abstract_id_remap[old_id])
+
+        for node in source_root:
+
+            if etree.QName(node).localname != "num":
+                continue
+
+            old_id = node.get(f"{W_NS}numId")
+
+            if old_id is None:
+                continue
+
+            new_node = deepcopy(node)
+
+            abstract_ref = new_node.find("w:abstractNumId", namespaces=NS)
+
+            if abstract_ref is not None:
+                old_abstract_ref = abstract_ref.get(f"{W_NS}val")
+                abstract_ref.set(
+                    f"{W_NS}val",
+                    abstract_id_remap.get(old_abstract_ref, old_abstract_ref),
+                )
+
+            if old_id in num_by_id:
+                new_id = str(next_num_number)
+                next_num_number += 1
+                new_node.set(f"{W_NS}numId", new_id)
+                num_id_remap[old_id] = new_id
+            else:
+                num_id_remap[old_id] = old_id
+
+            num_by_id[num_id_remap[old_id]] = new_node
+            ordered_num_ids.append(num_id_remap[old_id])
+
+        merged_root = etree.Element(template_root.tag, nsmap=template_root.nsmap)
+
+        for node in other_nodes:
+            merged_root.append(node)
+
+        for abstract_id in ordered_abstract_ids:
+            merged_root.append(abstract_by_id[abstract_id])
+
+        for num_id in ordered_num_ids:
+            merged_root.append(num_by_id[num_id])
+
+        merged_xml = etree.tostring(
+            merged_root,
+            encoding="UTF-8",
+            xml_declaration=True,
+            standalone=True,
+        )
+
+        return merged_xml, num_id_remap
+
+    def _remap_numbering_ids(self, element, num_id_remap):
+
+        if not num_id_remap:
+            return
+
+        for num_id_node in element.iter(f"{W_NS}numId"):
+            value = num_id_node.get(f"{W_NS}val")
+            mapped = num_id_remap.get(value)
+
+            if mapped and mapped != value:
+                num_id_node.set(f"{W_NS}val", mapped)
+
+    # ------------------------------------------------------------------
+    # Force Word to recalculate fields (TOC/STYLEREF/PAGEREF/SEQ) on open
+    # ------------------------------------------------------------------
+
+    SETTINGS_UPDATE_FIELDS_ANCHOR = "hdrShapeDefaults"
+
+    def _build_settings_with_update_fields(self, base_docx_path):
+
+        settings_part = "word/settings.xml"
+
+        with ZipFile(base_docx_path, "r") as archive:
+            if settings_part not in archive.namelist():
+                return None
+            settings_xml = archive.read(settings_part)
+
+        root = etree.fromstring(settings_xml)
+
+        if root.find("w:updateFields", namespaces=NS) is not None:
+            return settings_xml
+
+        update_fields = etree.Element(f"{W_NS}updateFields")
+        update_fields.set(f"{W_NS}val", "true")
+
+        anchor = root.find(f"w:{self.SETTINGS_UPDATE_FIELDS_ANCHOR}", namespaces=NS)
+
+        if anchor is not None:
+            anchor.addprevious(update_fields)
+        else:
+            root.insert(0, update_fields)
+
+        return etree.tostring(
+            root,
+            encoding="UTF-8",
+            xml_declaration=True,
+            standalone=True,
+        )
+
+    def _build_custom_properties_xml(self, base_docx_path, resolved_metadata):
+
+        custom_part = "docProps/custom.xml"
+
+        with ZipFile(base_docx_path, "r") as archive:
+            if custom_part not in archive.namelist():
+                return None
+            custom_xml = archive.read(custom_part)
+
+        root = etree.fromstring(custom_xml)
+
+        custom_ns = {
+            "vt": "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes",
+        }
+
+        lowered_metadata = {
+            key.lower(): value
+            for key, value in resolved_metadata.items()
+            if value is not None
+        }
+
+        changed = False
+
+        for prop in root:
+            name = prop.get("name")
+
+            if not name:
+                continue
+
+            value = lowered_metadata.get(name.lower())
+
+            if value is None:
+                continue
+
+            lpwstr = prop.find("vt:lpwstr", namespaces=custom_ns)
+
+            if lpwstr is not None:
+                lpwstr.text = value
+                changed = True
+
+        if not changed:
+            return custom_xml
+
+        return etree.tostring(
+            root,
+            encoding="UTF-8",
+            xml_declaration=True,
+            standalone=True,
+        )
+
+    def _build_core_properties_xml(self, source_docx_path, resolved_title):
+
+        core_part = "docProps/core.xml"
+
+        with ZipFile(source_docx_path, "r") as archive:
+            if core_part not in archive.namelist():
+                return None
+            core_xml = archive.read(core_part)
+
+        if not resolved_title:
+            return core_xml
+
+        root = etree.fromstring(core_xml)
+
+        dc_ns = {"dc": "http://purl.org/dc/elements/1.1/"}
+        title_el = root.find("dc:title", namespaces=dc_ns)
+
+        if title_el is None:
+            return core_xml
+
+        title_el.text = resolved_title
+
+        return etree.tostring(
+            root,
+            encoding="UTF-8",
+            xml_declaration=True,
+            standalone=True,
+        )
 
     # ------------------------------------------------------------------
     # Cover metadata / field resolution
@@ -798,6 +1123,7 @@ class Builder:
         style_mapper,
         style_alias_map,
         id_remap,
+        num_id_remap=None,
         cover_content=None,
         content_width_twips=None,
     ):
@@ -824,6 +1150,7 @@ class Builder:
                     content_width_twips=content_width_twips,
                 ):
                     self._remap_relationship_ids(element, id_remap)
+                    self._remap_numbering_ids(element, num_id_remap or {})
                     body.append(element)
 
         if sections is not None and content_idx is not None:
@@ -1041,6 +1368,14 @@ class Builder:
         if etree.QName(element).localname == "p":
             self._normalize_paragraph_formatting(element, style_id is not None)
 
+            if style_id in HEADING_STYLE_IDS:
+                # Chapter/section numbering is owned exclusively by the template's
+                # heading styles - a direct numPr carried over from the source
+                # (often numId="0", used by source authors to suppress their own
+                # list numbering) would silently override and kill the template's
+                # multilevel heading numbering, so it must never survive migration.
+                self._strip_direct_paragraph_numbering(element)
+
             if apply_caption_numbering:
                 self._apply_caption_number_bold(element)
 
@@ -1060,6 +1395,21 @@ class Builder:
 
         if sectpr is not None:
             ppr.remove(sectpr)
+
+    def _strip_direct_paragraph_numbering(self, element):
+
+        if etree.QName(element).localname != "p":
+            return
+
+        ppr = element.find("w:pPr", namespaces=NS)
+
+        if ppr is None:
+            return
+
+        numpr = ppr.find("w:numPr", namespaces=NS)
+
+        if numpr is not None:
+            ppr.remove(numpr)
 
     def _mapped_style_name(
         self,
@@ -1314,6 +1664,13 @@ class Builder:
 
     def _apply_caption_number_bold(self, paragraph_element):
 
+        if self._paragraph_has_seq_field(paragraph_element):
+            # A real Word Caption/SEQ field already exists (source authored via
+            # Insert Caption) - preserve it exactly, only bold the label+field
+            # portion, never flatten it to static text.
+            self._bold_existing_caption_field(paragraph_element)
+            return
+
         runs = paragraph_element.findall("w:r", namespaces=NS)
 
         if not runs:
@@ -1333,14 +1690,122 @@ class Builder:
         rest = combined[len(prefix):]
 
         template_rpr = runs[0].find("w:rPr", namespaces=NS)
+        label_match = re.match(r"(figure|table)", prefix, re.IGNORECASE)
+        number_match = re.search(r"\d+(\.\d+)*", prefix)
 
         for run in runs:
             paragraph_element.remove(run)
 
-        paragraph_element.append(self._make_caption_run(template_rpr, prefix, bold=True))
+        if label_match and number_match:
+            # No pre-existing field - synthesize a real Word SEQ field so the
+            # caption number updates automatically instead of being static text.
+            label = label_match.group(1).capitalize()
 
-        if rest:
-            paragraph_element.append(self._make_caption_run(template_rpr, rest, bold=False))
+            for new_run in self._build_caption_seq_field_runs(
+                template_rpr,
+                label=label,
+                cached_number=number_match.group(0),
+                remainder_text=rest,
+            ):
+                paragraph_element.append(new_run)
+        else:
+            paragraph_element.append(self._make_caption_run(template_rpr, prefix, bold=True))
+
+            if rest:
+                paragraph_element.append(self._make_caption_run(template_rpr, rest, bold=False))
+
+    def _paragraph_has_seq_field(self, paragraph_element):
+
+        instr_texts = paragraph_element.xpath(".//w:instrText/text()", namespaces=NS)
+        return any("SEQ" in instr.upper() for instr in instr_texts)
+
+    def _bold_existing_caption_field(self, paragraph_element):
+
+        runs = paragraph_element.findall("w:r", namespaces=NS)
+        end_index = None
+
+        for idx, run in enumerate(runs):
+            fldchar = run.find("w:fldChar", namespaces=NS)
+
+            if fldchar is not None and fldchar.get(f"{W_NS}fldCharType") == "end":
+                end_index = idx
+                break
+
+        if end_index is None:
+            return
+
+        for run in runs[: end_index + 1]:
+            self._set_run_bold(run, True)
+
+        for run in runs[end_index + 1 :]:
+            self._set_run_bold(run, False)
+
+    def _set_run_bold(self, run, bold):
+
+        rpr = run.find("w:rPr", namespaces=NS)
+
+        if rpr is None:
+            rpr = etree.Element(f"{W_NS}rPr")
+            run.insert(0, rpr)
+
+        existing_bold = rpr.find("w:b", namespaces=NS)
+
+        if bold:
+            if existing_bold is None:
+                etree.SubElement(rpr, f"{W_NS}b")
+        elif existing_bold is not None:
+            rpr.remove(existing_bold)
+
+    def _build_caption_seq_field_runs(self, template_rpr, label, cached_number, remainder_text):
+
+        def make_rpr(bold):
+            rpr = deepcopy(template_rpr) if template_rpr is not None else etree.Element(f"{W_NS}rPr")
+            existing_bold = rpr.find("w:b", namespaces=NS)
+
+            if bold:
+                if existing_bold is None:
+                    etree.SubElement(rpr, f"{W_NS}b")
+            elif existing_bold is not None:
+                rpr.remove(existing_bold)
+
+            return rpr
+
+        def make_text_run(text, bold):
+            run = etree.Element(f"{W_NS}r")
+            run.append(make_rpr(bold))
+            t_node = etree.SubElement(run, f"{W_NS}t")
+            t_node.text = text
+            t_node.set(f"{XML_NS}space", "preserve")
+            return run
+
+        def make_fldchar_run(fld_char_type, bold):
+            run = etree.Element(f"{W_NS}r")
+            run.append(make_rpr(bold))
+            fldchar = etree.SubElement(run, f"{W_NS}fldChar")
+            fldchar.set(f"{W_NS}fldCharType", fld_char_type)
+            return run
+
+        def make_instr_run(instr_text, bold):
+            run = etree.Element(f"{W_NS}r")
+            run.append(make_rpr(bold))
+            instr_node = etree.SubElement(run, f"{W_NS}instrText")
+            instr_node.text = instr_text
+            instr_node.set(f"{XML_NS}space", "preserve")
+            return run
+
+        runs = [
+            make_text_run(f"{label} ", bold=True),
+            make_fldchar_run("begin", bold=True),
+            make_instr_run(f" SEQ {label} \\* ARABIC ", bold=True),
+            make_fldchar_run("separate", bold=True),
+            make_text_run(cached_number, bold=True),
+            make_fldchar_run("end", bold=True),
+        ]
+
+        if remainder_text:
+            runs.append(make_text_run(remainder_text, bold=False))
+
+        return runs
 
     def _make_caption_run(self, template_rpr, text, bold):
 
@@ -1429,6 +1894,8 @@ class Builder:
             "word/styles.xml",
             "word/stylesWithEffects.xml",
             "word/theme/theme1.xml",
+            "word/numbering.xml",
+            "word/settings.xml",
         }
 
         if filename in {"[Content_Types].xml", "word/_rels/document.xml.rels"}:

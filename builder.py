@@ -109,6 +109,10 @@ class Builder:
             first_heading_text,
         )
 
+        cover_content = self._extract_cover_content(model)
+
+        content_width_twips = self._get_template_content_width_twips(base_docx_path)
+
         rebuilt_document = self._rebuild_document_xml(
             model,
             base_docx_path=base_docx_path,
@@ -116,6 +120,8 @@ class Builder:
             style_mapper=active_style_mapper,
             style_alias_map=style_alias_map,
             id_remap=id_remap,
+            cover_content=cover_content,
+            content_width_twips=content_width_twips,
         )
 
         rebuilt_document = self._update_fields_in_xml(rebuilt_document, field_resolver)
@@ -377,6 +383,179 @@ class Builder:
 
         return None
 
+    # ------------------------------------------------------------------
+    # Cover-page placeholder content population
+    # ------------------------------------------------------------------
+
+    COVER_FEATURES_KEYWORDS = ("feature",)
+    COVER_APPLICATIONS_KEYWORDS = ("application",)
+    COVER_MAX_BULLETS = 10
+
+    def _extract_cover_content(self, model):
+
+        ordered_items = sorted(model.content, key=lambda item: item.order_index)
+
+        return {
+            "features": self._collect_bullets_after_heading(
+                ordered_items, self.COVER_FEATURES_KEYWORDS
+            )[: self.COVER_MAX_BULLETS],
+            "applications": self._collect_bullets_after_heading(
+                ordered_items, self.COVER_APPLICATIONS_KEYWORDS
+            )[: self.COVER_MAX_BULLETS],
+            "description": self._collect_description(ordered_items),
+        }
+
+    def _collect_bullets_after_heading(self, ordered_items, keywords):
+
+        bullets = []
+        collecting = False
+
+        for item in ordered_items:
+            class_name = item.__class__.__name__.lower()
+
+            if class_name == "heading":
+                if collecting:
+                    break
+
+                heading_text = (getattr(item, "text", "") or "").strip().lower()
+
+                if any(keyword in heading_text for keyword in keywords):
+                    collecting = True
+
+                continue
+
+            if collecting and class_name == "paragraph":
+                text = (getattr(item, "text", "") or "").strip()
+                if text:
+                    bullets.append(text)
+
+        return bullets
+
+    def _collect_description(self, ordered_items):
+
+        for idx, item in enumerate(ordered_items):
+
+            if item.__class__.__name__.lower() != "heading":
+                continue
+
+            heading_text = (getattr(item, "text", "") or "").strip().lower()
+
+            if "description" not in heading_text:
+                continue
+
+            for later_item in ordered_items[idx + 1:]:
+                class_name = later_item.__class__.__name__.lower()
+
+                if class_name == "heading":
+                    break
+
+                if class_name == "paragraph":
+                    text = (getattr(later_item, "text", "") or "").strip()
+                    if text:
+                        return text
+
+            break
+
+        return None
+
+    def _build_cover_replacement_elements(self, element, cover_content):
+
+        if etree.QName(element).localname != "p":
+            return None
+
+        text = "".join(element.xpath(".//*[local-name()='t']/text()")).strip().lower()
+
+        if not text:
+            return None
+
+        if "insert a bulleted list of features" in text:
+            return self._clone_bullet_paragraphs(element, cover_content.get("features"))
+
+        if "insert a bulleted list of potential" in text:
+            return self._clone_bullet_paragraphs(element, cover_content.get("applications"))
+
+        if "description of the product" in text:
+            description = cover_content.get("description")
+            if not description:
+                return None
+            return [self._clone_paragraph_with_text(element, description)]
+
+        return None
+
+    def _clone_bullet_paragraphs(self, template_paragraph, texts):
+
+        if not texts:
+            return None
+
+        return [
+            self._clone_paragraph_with_text(template_paragraph, text)
+            for text in texts
+        ]
+
+    def _clone_paragraph_with_text(self, template_paragraph, text):
+
+        clone = deepcopy(template_paragraph)
+
+        runs = clone.findall(f"{W_NS}r")
+        template_rpr = runs[0].find(f"{W_NS}rPr") if runs else None
+
+        for run in runs:
+            clone.remove(run)
+
+        for hyperlink in clone.findall(f"{W_NS}hyperlink"):
+            clone.remove(hyperlink)
+
+        clone.append(self._make_text_run(template_rpr, text))
+
+        return clone
+
+    def _make_text_run(self, template_rpr, text):
+
+        run = etree.Element(f"{W_NS}r")
+
+        if template_rpr is not None:
+            run.append(deepcopy(template_rpr))
+
+        t_node = etree.SubElement(run, f"{W_NS}t")
+        t_node.text = text
+        t_node.set(f"{XML_NS}space", "preserve")
+
+        return run
+
+    # ------------------------------------------------------------------
+    # Template page geometry
+    # ------------------------------------------------------------------
+
+    def _get_template_content_width_twips(self, base_docx_path):
+
+        with ZipFile(base_docx_path, "r") as archive:
+            root = etree.fromstring(archive.read("word/document.xml"))
+
+        sectpr_nodes = root.xpath("./w:body/w:sectPr", namespaces=NS)
+
+        if not sectpr_nodes:
+            sectpr_nodes = root.xpath(".//w:sectPr", namespaces=NS)
+
+        if not sectpr_nodes:
+            return None
+
+        sectpr = sectpr_nodes[-1]
+
+        pgsz = sectpr.find("w:pgSz", namespaces=NS)
+        pgmar = sectpr.find("w:pgMar", namespaces=NS)
+
+        if pgsz is None or pgmar is None:
+            return None
+
+        try:
+            page_width = int(pgsz.get(f"{W_NS}w"))
+            left_margin = int(pgmar.get(f"{W_NS}left", "0"))
+            right_margin = int(pgmar.get(f"{W_NS}right", "0"))
+        except (TypeError, ValueError):
+            return None
+
+        return max(page_width - left_margin - right_margin, 0)
+
     def _make_field_resolver(self, metadata, first_heading1_text):
 
         lowered_metadata = {key.lower(): value for key, value in metadata.items()}
@@ -533,6 +712,8 @@ class Builder:
         style_mapper,
         style_alias_map,
         id_remap,
+        cover_content=None,
+        content_width_twips=None,
     ):
 
         with ZipFile(base_docx_path, "r") as source_zip:
@@ -554,6 +735,7 @@ class Builder:
                     item,
                     style_mapper=style_mapper,
                     style_alias_map=style_alias_map,
+                    content_width_twips=content_width_twips,
                 ):
                     self._remap_relationship_ids(element, id_remap)
                     body.append(element)
@@ -562,8 +744,20 @@ class Builder:
 
             for idx in range(content_idx):
                 for element in sections[idx][0]:
+
+                    replacement = self._build_cover_replacement_elements(
+                        element,
+                        cover_content or {},
+                    )
+
+                    if replacement is not None:
+                        for repl_element in replacement:
+                            body.append(repl_element)
+                        continue
+
                     if self._is_forbidden_element(element):
                         continue
+
                     body.append(deepcopy(element))
 
             content_sectpr_template = sections[content_idx][1]
@@ -673,6 +867,7 @@ class Builder:
         item,
         style_mapper,
         style_alias_map,
+        content_width_twips=None,
     ):
 
         if isinstance(item, FigureBlock):
@@ -710,7 +905,12 @@ class Builder:
             return elements
 
         if item.__class__.__name__.lower() == "table":
-            return self._build_table_elements(item, style_mapper, style_alias_map)
+            return self._build_table_elements(
+                item,
+                style_mapper,
+                style_alias_map,
+                content_width_twips=content_width_twips,
+            )
 
         is_caption = item.__class__.__name__.lower() == "caption"
 
@@ -775,7 +975,7 @@ class Builder:
     # Table styling
     # ------------------------------------------------------------------
 
-    def _build_table_elements(self, item, style_mapper, style_alias_map):
+    def _build_table_elements(self, item, style_mapper, style_alias_map, content_width_twips=None):
 
         element = etree.fromstring(item.xml.encode("utf-8"))
 
@@ -789,10 +989,121 @@ class Builder:
 
         self._ensure_table_look_banding(element)
 
+        # Source colors/borders/widths must never survive; the template style drives appearance.
+        self._strip_table_direct_formatting(element)
+        self._fit_table_width_to_page(element, content_width_twips)
+
         if style_mapper is not None:
             self._apply_table_cell_styles(element, style_mapper, style_alias_map)
 
         return [deepcopy(element)]
+
+    def _strip_table_direct_formatting(self, table_element):
+
+        tblpr = table_element.find("w:tblPr", namespaces=NS)
+
+        if tblpr is not None:
+            for tag in ("w:tblBorders", "w:shd", "w:tblInd", "w:tblCellMar"):
+                node = tblpr.find(tag, namespaces=NS)
+                if node is not None:
+                    tblpr.remove(node)
+
+        for row in table_element.findall("w:tr", namespaces=NS):
+            for cell in row.findall("w:tc", namespaces=NS):
+                tcpr = cell.find("w:tcPr", namespaces=NS)
+
+                if tcpr is None:
+                    continue
+
+                for tag in ("w:shd", "w:tcBorders", "w:tcMar"):
+                    node = tcpr.find(tag, namespaces=NS)
+                    if node is not None:
+                        tcpr.remove(node)
+
+    def _fit_table_width_to_page(self, table_element, content_width_twips):
+
+        if not content_width_twips:
+            return
+
+        tblpr = table_element.find("w:tblPr", namespaces=NS)
+
+        if tblpr is None:
+            tblpr = etree.Element(f"{W_NS}tblPr")
+            table_element.insert(0, tblpr)
+
+        tblw = tblpr.find("w:tblW", namespaces=NS)
+
+        if tblw is None:
+            tblw = etree.SubElement(tblpr, f"{W_NS}tblW")
+
+        tblw.set(f"{W_NS}w", str(content_width_twips))
+        tblw.set(f"{W_NS}type", "dxa")
+
+        tbllayout = tblpr.find("w:tblLayout", namespaces=NS)
+
+        if tbllayout is None:
+            tbllayout = etree.SubElement(tblpr, f"{W_NS}tblLayout")
+
+        tbllayout.set(f"{W_NS}type", "fixed")
+
+        grid = table_element.find("w:tblGrid", namespaces=NS)
+        columns = grid.findall("w:gridCol", namespaces=NS) if grid is not None else []
+
+        if not columns:
+            return
+
+        original_widths = []
+
+        for col in columns:
+            try:
+                original_widths.append(int(col.get(f"{W_NS}w", "0")))
+            except ValueError:
+                original_widths.append(0)
+
+        total_original = sum(original_widths) or 1
+
+        new_widths = [
+            max(round(width * content_width_twips / total_original), 1)
+            for width in original_widths
+        ]
+
+        # Correct rounding drift so columns sum exactly to the available width.
+        new_widths[-1] += content_width_twips - sum(new_widths)
+
+        for col, width in zip(columns, new_widths):
+            col.set(f"{W_NS}w", str(width))
+
+        for row in table_element.findall("w:tr", namespaces=NS):
+
+            col_idx = 0
+
+            for cell in row.findall("w:tc", namespaces=NS):
+
+                tcpr = cell.find("w:tcPr", namespaces=NS)
+                span = 1
+
+                if tcpr is not None:
+                    gridspan = tcpr.find("w:gridSpan", namespaces=NS)
+                    if gridspan is not None:
+                        try:
+                            span = max(int(gridspan.get(f"{W_NS}val", "1")), 1)
+                        except ValueError:
+                            span = 1
+
+                cell_width = sum(new_widths[col_idx:col_idx + span])
+                col_idx += span
+
+                if tcpr is None:
+                    tcpr = etree.Element(f"{W_NS}tcPr")
+                    cell.insert(0, tcpr)
+
+                tcw = tcpr.find("w:tcW", namespaces=NS)
+
+                if tcw is None:
+                    tcw = etree.SubElement(tcpr, f"{W_NS}tcW")
+
+                tcw.set(f"{W_NS}w", str(cell_width))
+                tcw.set(f"{W_NS}type", "dxa")
 
     def _resolve_real_table_style_id(self, style_alias_map):
 
@@ -855,6 +1166,9 @@ class Builder:
 
                     if resolved:
                         self._set_paragraph_style(paragraph, resolved)
+
+                    # Header/body cell text must use only the template style, never the source font/color.
+                    self._normalize_paragraph_formatting(paragraph, True)
 
     def _paragraph_alignment(self, paragraph):
 
@@ -1160,9 +1474,10 @@ class Builder:
             ppr = paragraph_element.find("w:pPr", namespaces=NS)
 
             if ppr is not None:
-                spacing = ppr.find("w:spacing", namespaces=NS)
-                if spacing is not None:
-                    ppr.remove(spacing)
+                for tag in ("w:spacing", "w:ind"):
+                    node = ppr.find(tag, namespaces=NS)
+                    if node is not None:
+                        ppr.remove(node)
 
         if not strip_runs:
             return

@@ -458,6 +458,92 @@ class Builder:
 
         return None
 
+    # ------------------------------------------------------------------
+    # Cover-page block reordering (Description must precede Features/Applications)
+    # ------------------------------------------------------------------
+
+    COVER_BLOCK_ORDER = ["description", "features", "applications", "product_validation"]
+
+    COVER_BLOCK_KEYWORDS = {
+        "description": ("description",),
+        "features": ("feature",),
+        "applications": ("application",),
+        "product_validation": ("product validation",),
+    }
+
+    def _reorder_cover_sections(self, elements):
+
+        blocks = {}
+        other_before = []
+        other_after = []
+        current_block = None
+        seen_any_block = False
+        collecting_ended = False
+
+        for element in elements:
+
+            if collecting_ended:
+                other_after.append(element)
+                continue
+
+            is_heading = self._is_cover_heading_paragraph(element)
+            block_key = self._match_cover_heading_block(element) if is_heading else None
+
+            if is_heading and block_key is None:
+                # A heading outside our known cover blocks (e.g. "Table of contents") ends reordering.
+                collecting_ended = True
+                other_after.append(element)
+                continue
+
+            if block_key is not None:
+                current_block = block_key
+                blocks.setdefault(current_block, []).append(element)
+                seen_any_block = True
+                continue
+
+            if current_block is not None and etree.QName(element).localname == "p":
+                blocks[current_block].append(element)
+                continue
+
+            if seen_any_block:
+                other_after.append(element)
+            else:
+                other_before.append(element)
+
+        if not blocks:
+            return elements
+
+        reordered = list(other_before)
+
+        for key in self.COVER_BLOCK_ORDER:
+            reordered.extend(blocks.get(key, []))
+
+        reordered.extend(other_after)
+
+        return reordered
+
+    def _is_cover_heading_paragraph(self, element):
+
+        if etree.QName(element).localname != "p":
+            return False
+
+        pstyle = element.xpath("./w:pPr/w:pStyle/@w:val", namespaces=NS)
+
+        return bool(pstyle) and pstyle[0] == "HeadingPreface"
+
+    def _match_cover_heading_block(self, element):
+
+        if not self._is_cover_heading_paragraph(element):
+            return None
+
+        text = "".join(element.xpath(".//*[local-name()='t']/text()")).strip().lower()
+
+        for key, keywords in self.COVER_BLOCK_KEYWORDS.items():
+            if any(keyword in text for keyword in keywords):
+                return key
+
+        return None
+
     def _build_cover_replacement_elements(self, element, cover_content):
 
         if etree.QName(element).localname != "p":
@@ -743,7 +829,13 @@ class Builder:
         if sections is not None and content_idx is not None:
 
             for idx in range(content_idx):
-                for element in sections[idx][0]:
+
+                section_elements = sections[idx][0]
+
+                if idx == 0:
+                    section_elements = self._reorder_cover_sections(section_elements)
+
+                for element in section_elements:
 
                     replacement = self._build_cover_replacement_elements(
                         element,
@@ -932,6 +1024,9 @@ class Builder:
 
         element = etree.fromstring(xml_text.encode("utf-8"))
 
+        # Section/page structure is owned exclusively by the template - never by the source.
+        self._strip_embedded_section_break(element)
+
         if self._is_forbidden_element(element):
             return []
 
@@ -950,6 +1045,21 @@ class Builder:
                 self._apply_caption_number_bold(element)
 
         return [deepcopy(element)]
+
+    def _strip_embedded_section_break(self, element):
+
+        if etree.QName(element).localname != "p":
+            return
+
+        ppr = element.find("w:pPr", namespaces=NS)
+
+        if ppr is None:
+            return
+
+        sectpr = ppr.find("w:sectPr", namespaces=NS)
+
+        if sectpr is not None:
+            ppr.remove(sectpr)
 
     def _mapped_style_name(
         self,

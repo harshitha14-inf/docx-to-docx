@@ -55,6 +55,7 @@ extracted_images/
 
 reports/
 *.json
+!config/**/*.json
 
 # Uncomment if reports become generated artifacts
 # !sample_reports/

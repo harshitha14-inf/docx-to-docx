@@ -1,0 +1,21 @@
+{
+  "document_type_selection": {
+    "mode": "user_mandatory",
+    "allow_auto_detection": false,
+    "fallback_behavior": "reject"
+  },
+  "allowed_document_types": [
+    "datasheet",
+    "appnote",
+    "specification",
+    "user_manual",
+    "release_note"
+  ],
+  "required_templates": {
+    "datasheet": "datasheet_template.docx",
+    "appnote": "appnote_template.docx",
+    "specification": "specification_template.docx",
+    "user_manual": "user_manual_template.docx",
+    "release_note": "release_note_template.docx"
+  }
+}

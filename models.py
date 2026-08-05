@@ -11,6 +11,14 @@ class ContentItem:
 @dataclass
 class Paragraph(ContentItem):
     text: str
+    style: Optional[str] = None
+
+
+@dataclass
+class Heading(ContentItem):
+    level: int
+    text: str
+    style: Optional[str] = None
 
 
 @dataclass
@@ -37,6 +45,7 @@ class Image(ContentItem):
 class Caption(ContentItem):
     text: str
     caption_type: str
+    style: Optional[str] = None
 
 
 @dataclass
@@ -59,11 +68,13 @@ class FigureBlock(ContentItem):
 @dataclass
 class Header:
     text: str
+    style: Optional[str] = None
 
 
 @dataclass
 class Footer:
     text: str
+    style: Optional[str] = None
 
 
 @dataclass

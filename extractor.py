@@ -12,6 +12,7 @@ from models import (
     DocumentModel,
     FigureBlock,
     Footer,
+    Heading,
     Header,
     Image,
     ImageRef,
@@ -177,8 +178,18 @@ class Extractor:
             )
 
             if header_text:
+                header_style = None
+
+                for paragraph in section.header.paragraphs:
+                    if paragraph.text.strip() and paragraph.style is not None:
+                        header_style = paragraph.style.name
+                        break
+
                 model.headers.append(
-                    Header(header_text)
+                    Header(
+                        text=header_text,
+                        style=header_style,
+                    )
                 )
 
             footer_text = "\n".join(
@@ -188,8 +199,18 @@ class Extractor:
             )
 
             if footer_text:
+                footer_style = None
+
+                for paragraph in section.footer.paragraphs:
+                    if paragraph.text.strip() and paragraph.style is not None:
+                        footer_style = paragraph.style.name
+                        break
+
                 model.footers.append(
-                    Footer(footer_text)
+                    Footer(
+                        text=footer_text,
+                        style=footer_style,
+                    )
                 )
 
     def _extract_sections(
@@ -365,6 +386,7 @@ class Extractor:
                 xml=xml,
                 text=text,
                 caption_type="image",
+                style=self._get_paragraph_style_name(element),
             )
 
         if TABLE_CAPTION_RE.match(text):
@@ -373,12 +395,27 @@ class Extractor:
                 xml=xml,
                 text=text,
                 caption_type="table",
+                style=self._get_paragraph_style_name(element),
+            )
+
+        heading_level = self._detect_heading_level(
+            element
+        )
+
+        if heading_level is not None:
+            return Heading(
+                order_index=order_index,
+                xml=xml,
+                level=heading_level,
+                text=text,
+                style=self._get_paragraph_style_name(element),
             )
 
         return Paragraph(
             order_index=order_index,
             xml=xml,
             text=text,
+            style=self._get_paragraph_style_name(element),
         )
 
     def _extract_table_item(
@@ -674,3 +711,50 @@ class Extractor:
             return 0
 
         return int(value)
+
+    def _get_paragraph_style_name(
+        self,
+        element,
+    ):
+
+        style_value = element.xpath(
+            "./*[local-name()='pPr']/*[local-name()='pStyle']/@*[local-name()='val']"
+        )
+
+        if not style_value:
+            return None
+
+        return style_value[0]
+
+    def _detect_heading_level(
+        self,
+        element,
+    ):
+
+        style_name = (
+            self._get_paragraph_style_name(
+                element
+            )
+            or ""
+        ).strip().lower()
+
+        match = re.search(
+            r"heading\s*([1-9])$",
+            style_name,
+        )
+
+        if match:
+            return int(match.group(1))
+
+        outline_levels = element.xpath(
+            "./*[local-name()='pPr']/*[local-name()='outlineLvl']/@*[local-name()='val']"
+        )
+
+        if outline_levels:
+            try:
+                # Word stores outline level as zero-based.
+                return int(outline_levels[0]) + 1
+            except ValueError:
+                return None
+
+        return None

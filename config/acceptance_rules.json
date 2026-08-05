@@ -1,0 +1,22 @@
+{
+  "migration_loss": {
+    "image_loss": 0,
+    "table_loss": 0,
+    "heading_loss": 0,
+    "reference_loss": 0,
+    "textbox_loss": 0,
+    "header_footer_loss": 0,
+    "landscape_section_loss": 0
+  },
+  "caption_rules": {
+    "figure_caption_style_match": 100,
+    "table_caption_style_match": 100
+  },
+  "heading_rules": {
+    "heading_style_match": 95
+  },
+  "template_rules": {
+    "required_style_missing": 0,
+    "template_load_failures": 0
+  }
+}

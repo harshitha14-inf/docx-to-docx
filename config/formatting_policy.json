@@ -1,0 +1,57 @@
+{
+  "strip_direct_run_formatting_for_mapped_blocks": true,
+  "preserve_bold": true,
+  "preserve_italic": true,
+  "preserve_underline": false,
+  "preserve_hyperlinks": true,
+  "preserve_bookmarks": true,
+  "preserve_cross_references": true,
+  "preserve_figure_references": true,
+  "preserve_table_references": true,
+  "preserve_table_cell_shading": true,
+  "preserve_table_borders": true,
+  "preserve_table_row_heights": true,
+  "preserve_table_column_widths": true,
+  "preserve_images": true,
+  "preserve_image_scaling": true,
+  "preserve_textboxes": true,
+  "preserve_headers": true,
+  "preserve_footers": true,
+  "preserve_page_orientation": true,
+  "preserve_section_breaks": true,
+  "normalize_fonts_to_template": true,
+  "normalize_paragraph_spacing_to_template": true,
+  "normalize_heading_styles_to_template": true,
+  "required_styles": [
+    "Heading 1",
+    "Heading 2",
+    "Heading 3",
+    "Heading 4",
+    "Caption",
+    "TableHead",
+    "TableCell"
+  ],
+  "optional_styles": [
+    "List Bullet",
+    "List Number",
+    "Default Table"
+  ],
+  "forbidden_content": [
+    "Insert a bulleted list of features",
+    "Insert a bulleted list of potential applications",
+    "Insert a bulleted list",
+    "Insert the applicable Quality Requirement",
+    "Description of the product. A graphic should be included",
+    "Document title",
+    "Title continued",
+    "Error! Use the Home tab",
+    "Formatting example",
+    "Please read the Getting Started Guide",
+    "Please read the Getting started guide",
+    "You must delete all of this example content"
+  ],
+  "content_section_markers": [
+    "Formatting example",
+    "{{MIGRATED_CONTENT}}"
+  ]
+}

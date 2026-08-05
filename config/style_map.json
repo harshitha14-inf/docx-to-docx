@@ -1,0 +1,41 @@
+{
+  "heading_1": "Heading 1",
+  "heading_2": "Heading 2",
+  "heading_3": "Heading 3",
+  "heading_4": "Heading 4",
+  "body_paragraph": "Normal",
+  "figure_caption": "Caption",
+  "table_caption": "Caption",
+  "table_header_left": "TableHead-l",
+  "table_header_center": "TableHead-c",
+  "table_header": "TableHead",
+  "table_cell_left": "TableCell-l",
+  "table_cell_center": "TableCell-c",
+  "table_cell": "TableCell",
+  "table_cell_bold": "TableCellBold",
+  "table_cell_bold_italic": "TableCellBold-I",
+  "code_listing": "Code",
+  "bullet_list": "A bullet",
+  "dash_indented_list": "Dashindented",
+  "table_style": {
+    "type": "alias",
+    "maps_to": [
+      "TableHead",
+      "TableHead-l",
+      "TableHead-c",
+      "TableCell",
+      "TableCell-l",
+      "TableCell-c",
+      "TableCellBold",
+      "TableCellBold-I"
+    ]
+  },
+  "list_bullet": {
+    "type": "semantic",
+    "maps_to": "A bullet"
+  },
+  "list_number": {
+    "type": "fallback",
+    "maps_to": "Normal"
+  }
+}

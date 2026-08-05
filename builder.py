@@ -1,121 +1,152 @@
-from docx import Document
+from copy import deepcopy
+from zipfile import ZipFile
 
-from models import (
-    Paragraph,
-    Table,
-    Image,
-    Caption
-)
+from lxml import etree
+
+from models import FigureBlock
+
+
+NS = {
+    "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+}
 
 
 class Builder:
 
     def build(self, model, out_file):
 
-        doc = Document()
-
-        # -------------------
-        # Headers
-        # -------------------
-
-        if model.headers:
-
-            section = doc.sections[0]
-
-            header = section.header
-
-            header.paragraphs[0].text = (
-                model.headers[0].text
+        if not model.source_docx_path:
+            raise ValueError(
+                "DocumentModel.source_docx_path is required"
             )
 
-        # -------------------
-        # Footers
-        # -------------------
+        rebuilt_document = self._rebuild_document_xml(
+            model
+        )
 
-        if model.footers:
+        with ZipFile(
+            model.source_docx_path,
+            "r",
+        ) as source_zip:
 
-            section = doc.sections[0]
+            with ZipFile(
+                out_file,
+                "w",
+            ) as output_zip:
 
-            footer = section.footer
+                for info in source_zip.infolist():
 
-            footer.paragraphs[0].text = (
-                model.footers[0].text
+                    data = source_zip.read(
+                        info.filename
+                    )
+
+                    if info.filename == "word/document.xml":
+                        data = rebuilt_document
+
+                    output_zip.writestr(
+                        info,
+                        data,
+                    )
+
+    def _rebuild_document_xml(
+        self,
+        model,
+    ):
+
+        with ZipFile(
+            model.source_docx_path,
+            "r",
+        ) as source_zip:
+            root = etree.fromstring(
+                source_zip.read(
+                    "word/document.xml"
+                )
             )
 
-        # -------------------
-        # Main Content
-        # -------------------
+        body = root.xpath(
+            "./w:body",
+            namespaces=NS,
+        )[0]
 
-        for item in model.content:
+        for child in list(body):
+            body.remove(child)
 
-            # Paragraph
+        ordered_items = sorted(
+            model.content,
+            key=lambda item: item.order_index,
+        )
 
-            if isinstance(item, Paragraph):
+        for item in ordered_items:
 
-                doc.add_paragraph(
-                    item.text
-                )
+            for element in self._elements_for_item(
+                item
+            ):
+                body.append(element)
 
-            # Caption
-
-            elif isinstance(item, Caption):
-
-                p = doc.add_paragraph()
-
-                run = p.add_run(
-                    item.text
-                )
-
-                run.bold = True
-
-            # Table
-
-            elif isinstance(item, Table):
-
-                if not item.data:
-                    continue
-
-                rows = len(item.data)
-
-                cols = max(
-                    len(row)
-                    for row in item.data
-                )
-
-                table = doc.add_table(
-                    rows=rows,
-                    cols=cols
-                )
-
-                for r, row in enumerate(
-                    item.data
-                ):
-
-                    for c, value in enumerate(
-                        row
-                    ):
-
-                        table.cell(
-                            r,
-                            c
-                        ).text = value
-
-            # Image
-
-            elif isinstance(item, Image):
-
-                try:
-
-                    doc.add_picture(
-                        item.path
+        if model.body_sectpr_xml:
+            body.append(
+                etree.fromstring(
+                    model.body_sectpr_xml.encode(
+                        "utf-8"
                     )
+                )
+            )
 
-                except Exception as e:
+        return etree.tostring(
+            root,
+            encoding="UTF-8",
+            xml_declaration=True,
+            standalone=True,
+        )
 
-                    print(
-                        f"Could not add image "
-                        f"{item.name}: {e}"
+    def _elements_for_item(
+        self,
+        item,
+    ):
+
+        if isinstance(item, FigureBlock):
+
+            elements = []
+
+            if item.caption_position == "before":
+                elements.extend(
+                    self._elements_for_xml(
+                        item.caption.xml
                     )
+                )
 
-        doc.save(out_file)
+            for image in item.images:
+                elements.extend(
+                    self._elements_for_xml(
+                        image.xml
+                    )
+                )
+
+            if item.caption_position == "after":
+                elements.extend(
+                    self._elements_for_xml(
+                        item.caption.xml
+                    )
+                )
+
+            return elements
+
+        return self._elements_for_xml(
+            item.xml
+        )
+
+    def _elements_for_xml(
+        self,
+        xml_text,
+    ):
+
+        element = etree.fromstring(
+            xml_text.encode(
+                "utf-8"
+            )
+        )
+
+        return [
+            deepcopy(element)
+        ]
 

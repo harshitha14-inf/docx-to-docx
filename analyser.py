@@ -238,11 +238,38 @@ class DocxAnalyzer:
             # TEXTBOXES
             # --------------------------------------------------
 
-            report["textboxes"] = len(
-                root.xpath(
-                    ".//*[local-name()='txbxContent']"
-                )
+            textbox_nodes = root.xpath(
+                ".//*[local-name()='txbxContent']"
             )
+
+            # Word often stores the same textbox twice via
+            # mc:AlternateContent (Choice/Fallback). Count each
+            # AlternateContent container as a single textbox.
+            altcontent_seen = set()
+            textbox_count = 0
+
+            for node in textbox_nodes:
+
+                altcontent = node.xpath(
+                    "ancestor::*[local-name()='AlternateContent'][1]"
+                )
+
+                if altcontent:
+
+                    alt_key = id(
+                        altcontent[0]
+                    )
+
+                    if alt_key in altcontent_seen:
+                        continue
+
+                    altcontent_seen.add(
+                        alt_key
+                    )
+
+                textbox_count += 1
+
+            report["textboxes"] = textbox_count
 
             # --------------------------------------------------
             # OLE OBJECTS

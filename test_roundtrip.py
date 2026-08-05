@@ -1,7 +1,7 @@
 from extractor import Extractor
 from builder import Builder
 
-SOURCE = "samples/tables_images_only.docx"
+SOURCE = "samples/real_ams.docx"
 OUTPUT = "samples/roundtrip_output.docx"
 
 model = Extractor(

@@ -23,6 +23,33 @@ TABLE_CAPTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Mirrors extractor.py's formula detection - a paragraph carrying a heading
+# style/outline level whose text is an equation must never count as a
+# heading in either the source or output snapshot.
+FORMULA_FUNCTION_RE = re.compile(
+    r"\b(ATAN2|ATAN|SIN|COS|TAN|SQRT|LOG)\s*\(",
+    re.IGNORECASE,
+)
+
+FORMULA_ASSIGNMENT_RE = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_]*(?:<[^>\s]{1,20}>)?\s*(?:\+=|-=|\*=|/=|=)\s*[\w(<\-.]"
+)
+
+
+def _is_formula_text(text):
+
+    if not text:
+        return False
+
+    if FORMULA_FUNCTION_RE.search(text):
+        return True
+
+    # Anchored at the start - see extractor.py's _is_formula_text for why.
+    if FORMULA_ASSIGNMENT_RE.match(text.strip()):
+        return True
+
+    return False
+
 NS = {
     "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
     "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
@@ -134,6 +161,9 @@ def validate(
         f"[{'PASS' if compliance['rules']['template_rules_pass'] else 'FAIL'}] Template Rules"
     )
     print(
+        f"[{'PASS' if compliance['rules']['formula_safety_pass'] else 'FAIL'}] Formula Safety"
+    )
+    print(
         f"[{'PASS' if compliance['forbidden_content_hits'] == 0 else 'FAIL'}] Forbidden Content"
     )
 
@@ -208,6 +238,12 @@ def _snapshot(docx_path):
         "figure_count": sum(1 for item in grouped_items if item["type"] == "figure"),
         "caption_count": sum(1 for item in top_level_items if item["type"] == "caption"),
         "heading_count": sum(1 for item in top_level_items if item["type"] == "heading"),
+        "formula_count": sum(1 for item in top_level_items if item["type"] == "formula"),
+        "suspicious_heading_count": sum(
+            1
+            for item in top_level_items
+            if item["type"] == "heading" and _is_formula_text(item.get("text", ""))
+        ),
         "table_count": sum(1 for item in top_level_items if item["type"] == "table"),
         "textbox_count": sum(1 for item in top_level_items if item["type"] == "textbox"),
         "reference_count": hyperlinks_external + hyperlinks_internal + cross_refs + bookmarks,
@@ -297,6 +333,14 @@ def _classify_top_level_item(element, rid_to_target, order_index):
             "caption_type": "table",
             "order_index": order_index,
             "text": text,
+            "style": style_name,
+        }
+
+    if _is_formula_text(text) or (textbox_texts and not text and any(_is_formula_text(t) for t in textbox_texts)):
+        return {
+            "type": "formula",
+            "order_index": order_index,
+            "text": text or "\n".join(textbox_texts),
             "style": style_name,
         }
 
@@ -773,6 +817,10 @@ def _build_contract_compliance(
         and template_load_failures <= template_rules.get("template_load_failures", 0)
     )
 
+    # Hard fail - formulas must never survive as headings (they must never be
+    # numbered, never enter the TOC, never participate in outline/navigation).
+    formula_safety_pass = output_snapshot.get("suspicious_heading_count", 0) == 0
+
     overall = "PASS"
 
     if (
@@ -780,6 +828,7 @@ def _build_contract_compliance(
         or not heading_rules_pass
         or not caption_rules_pass
         or not template_rules_pass
+        or not formula_safety_pass
         or forbidden_content_hits > 0
     ):
         overall = "FAIL"
@@ -796,11 +845,13 @@ def _build_contract_compliance(
         "optional_style_missing": optional_style_missing,
         "template_load_failures": template_load_failures,
         "forbidden_content_hits": forbidden_content_hits,
+        "suspicious_heading_count": output_snapshot.get("suspicious_heading_count", 0),
         "rules": {
             "loss_rules_pass": loss_rules_pass,
             "heading_rules_pass": heading_rules_pass,
             "caption_rules_pass": caption_rules_pass,
             "template_rules_pass": template_rules_pass,
+            "formula_safety_pass": formula_safety_pass,
         },
         "overall": overall,
     }

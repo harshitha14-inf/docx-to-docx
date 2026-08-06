@@ -118,6 +118,12 @@ class StyleMapper:
                 self.mapping.get("paragraph"),
             )
 
+        if name == "formula":
+            return self._resolve_mapping_value(
+                "code_listing",
+                self.mapping.get("body_paragraph", self.mapping.get("paragraph")),
+            )
+
         return None
 
     def style_for_table_cell(self, is_header, alignment="left", bold=False, italic=False):

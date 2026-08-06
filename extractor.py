@@ -9,15 +9,18 @@ from lxml import etree
 
 from models import (
     Caption,
+    Cell,
     DocumentModel,
     FigureBlock,
     Footer,
+    Formula,
     Heading,
     Header,
     Image,
     ImageRef,
     Paragraph,
     RawBlock,
+    Run,
     SectionInfo,
     SectionMargins,
     Table,
@@ -33,6 +36,18 @@ CAPTION_RE = re.compile(
 TABLE_CAPTION_RE = re.compile(
     r"^table\s+\d+(?:\.\d+)*(?::|\b)",
     re.IGNORECASE,
+)
+
+# Formula detection must run before any heading/paragraph classification -
+# equations are content, never headings, regardless of the source paragraph's
+# style or outline level (see repo memory for the corruption this caused).
+FORMULA_FUNCTION_RE = re.compile(
+    r"\b(ATAN2|ATAN|SIN|COS|TAN|SQRT|LOG)\s*\(",
+    re.IGNORECASE,
+)
+
+FORMULA_ASSIGNMENT_RE = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_]*(?:<[^>\s]{1,20}>)?\s*(?:\+=|-=|\*=|/=|=)\s*[\w(<\-.]"
 )
 
 
@@ -159,6 +174,10 @@ class Extractor:
 
         model.content = self._group_figure_blocks(
             provisional_items
+        )
+
+        self._mark_formula_grouping(
+            model.content
         )
 
         return model
@@ -374,6 +393,12 @@ class Extractor:
         ).strip()
 
         if textbox_texts and not text:
+            if any(self._is_formula_text(t) for t in textbox_texts):
+                return Formula(
+                    order_index=order_index,
+                    xml=xml,
+                    text="\n".join(textbox_texts),
+                )
             return TextBox(
                 order_index=order_index,
                 xml=xml,
@@ -398,9 +423,23 @@ class Extractor:
                 style=self._get_paragraph_style_name(element),
             )
 
+        # Formula detection runs before heading classification - a source
+        # paragraph carrying a Heading style/outline level whose text is an
+        # equation must still become Formula content, never a Heading.
+        if self._is_formula_text(text):
+            return Formula(
+                order_index=order_index,
+                xml=xml,
+                text=text,
+                style=self._get_paragraph_style_name(element),
+                runs=self._extract_runs(element),
+            )
+
         heading_level = self._detect_heading_level(
             element
         )
+
+        runs = self._extract_runs(element)
 
         if heading_level is not None:
             return Heading(
@@ -409,6 +448,7 @@ class Extractor:
                 level=heading_level,
                 text=text,
                 style=self._get_paragraph_style_name(element),
+                runs=runs,
             )
 
         return Paragraph(
@@ -416,6 +456,7 @@ class Extractor:
             xml=xml,
             text=text,
             style=self._get_paragraph_style_name(element),
+            runs=runs,
         )
 
     def _extract_table_item(
@@ -425,14 +466,16 @@ class Extractor:
     ):
 
         table_data = []
+        table_cells = []
 
         rows = element.xpath(
             ".//*[local-name()='tr']"
         )
 
-        for row in rows:
+        for row_idx, row in enumerate(rows):
 
             row_data = []
+            row_cells = []
 
             for cell in row.xpath(
                 ".//*[local-name()='tc']"
@@ -448,8 +491,22 @@ class Extractor:
                     value.strip()
                 )
 
+                row_cells.append(
+                    Cell(
+                        text=value.strip(),
+                        runs=self._extract_runs(cell),
+                        row_span=self._get_row_span(cell),
+                        col_span=self._get_col_span(cell),
+                        is_header=(row_idx == 0),
+                        raw_xml=etree.tostring(cell, encoding="unicode"),
+                    )
+                )
+
             table_data.append(
                 row_data
+            )
+            table_cells.append(
+                row_cells
             )
 
         return Table(
@@ -459,7 +516,120 @@ class Extractor:
                 encoding="unicode",
             ),
             data=table_data,
+            cells=table_cells,
         )
+
+    def _get_col_span(
+        self,
+        cell,
+    ):
+
+        gridspan = cell.xpath(
+            "./*[local-name()='tcPr']/*[local-name()='gridSpan']/@*[local-name()='val']"
+        )
+
+        if not gridspan:
+            return 1
+
+        try:
+            return max(int(gridspan[0]), 1)
+        except ValueError:
+            return 1
+
+    def _get_row_span(
+        self,
+        cell,
+    ):
+
+        vmerge = cell.xpath(
+            "./*[local-name()='tcPr']/*[local-name()='vMerge']/@*[local-name()='val']"
+        )
+
+        if vmerge and vmerge[0] == "continue":
+            return 0
+
+        return 1
+
+    def _extract_runs(
+        self,
+        element,
+    ):
+
+        runs = []
+
+        for run in element.xpath(
+            ".//*[local-name()='r']"
+        ):
+
+            ancestor = run.getparent()
+            skip_run = False
+
+            while ancestor is not None and ancestor is not element:
+
+                local_name = etree.QName(
+                    ancestor
+                ).localname
+
+                if local_name in {
+                    "drawing",
+                    "txbxContent",
+                }:
+                    skip_run = True
+                    break
+
+                ancestor = ancestor.getparent()
+
+            if skip_run:
+                continue
+
+            text = "".join(
+                run.xpath(
+                    "./*[local-name()='t']/text()"
+                )
+            )
+
+            if not text:
+                continue
+
+            rpr = run.find(
+                f"{{{self._namespaces['w']}}}rPr"
+            )
+
+            bold = False
+            italic = False
+            underline = False
+
+            if rpr is not None:
+                bold = rpr.find(f"{{{self._namespaces['w']}}}b") is not None
+                italic = rpr.find(f"{{{self._namespaces['w']}}}i") is not None
+                underline_node = rpr.find(f"{{{self._namespaces['w']}}}u")
+                underline = (
+                    underline_node is not None
+                    and underline_node.get(f"{{{self._namespaces['w']}}}val") not in (None, "none")
+                )
+
+            hyperlink_url = None
+
+            hyperlink_ancestor = run.xpath(
+                "ancestor::*[local-name()='hyperlink'][1]"
+            )
+
+            if hyperlink_ancestor:
+                hyperlink_url = hyperlink_ancestor[0].get(
+                    f"{{{self._namespaces['r']}}}id"
+                )
+
+            runs.append(
+                Run(
+                    text=text,
+                    bold=bold,
+                    italic=italic,
+                    underline=underline,
+                    hyperlink_url=hyperlink_url,
+                )
+            )
+
+        return runs
 
     def _get_image_refs(
         self,
@@ -683,6 +853,47 @@ class Extractor:
             index += 1
 
         return grouped_items
+
+    def _is_formula_text(
+        self,
+        text,
+    ):
+
+        if not text:
+            return False
+
+        if FORMULA_FUNCTION_RE.search(text):
+            return True
+
+        # Anchored at the start - an equation line IS an assignment, whereas
+        # a normal sentence that merely mentions a value inline ("operating
+        # temperature = -40 to +150\u00b0C") must stay a plain paragraph.
+        if FORMULA_ASSIGNMENT_RE.match(text.strip()):
+            return True
+
+        return False
+
+    def _mark_formula_grouping(
+        self,
+        items,
+    ):
+        """Flag the item immediately preceding a Formula for keep-with-next.
+
+        Preserves the explanation-paragraph -> formula -> formula-note visual
+        group (page-break/paragraph-flow only - order is already preserved by
+        order_index, this only prevents Word from splitting the group across
+        a page boundary).
+        """
+
+        for index in range(len(items) - 1):
+
+            if not isinstance(items[index + 1], Formula):
+                continue
+
+            current_item = items[index]
+
+            if isinstance(current_item, (Paragraph, Heading, Formula)):
+                current_item.keep_with_next = True
 
     def _enum_name(
         self,

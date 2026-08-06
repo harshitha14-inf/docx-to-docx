@@ -7,7 +7,7 @@ from zipfile import ZipFile
 
 from lxml import etree
 
-from models import FigureBlock
+from models import FigureBlock, Formula, Run
 from style_engine.style_mapper import StyleMapper
 from template_manager import TemplateManager
 
@@ -28,13 +28,32 @@ REL_ID_ATTR_LOCALNAMES = {"id", "embed", "link", "dm", "lo", "qs", "cs", "href"}
 REL_TYPE_STYLES = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles"
 REL_TYPE_STYLES_WITH_EFFECTS = "http://schemas.microsoft.com/office/2007/relationships/stylesWithEffects"
 REL_TYPE_THEME = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme"
+REL_TYPE_SETTINGS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings"
+REL_TYPE_NUMBERING = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering"
+REL_TYPE_FONT_TABLE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable"
+REL_TYPE_WEB_SETTINGS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/webSettings"
+REL_TYPE_FOOTNOTES = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes"
+REL_TYPE_ENDNOTES = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes"
+REL_TYPE_GLOSSARY_DOCUMENT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/glossaryDocument"
 
+# Relationship types for document-level parts that are singletons per the OPC/
+# ECMA-376 spec (resolved by Word by TYPE, not by r:id) - the source document's
+# own copies of these must never be merged in alongside the template's, or the
+# package ends up with two relationships of the same singleton type and Word
+# rejects the whole file as corrupted.
 TEMPLATE_OWNED_REL_TYPES = {
     REL_TYPE_HEADER,
     REL_TYPE_FOOTER,
     REL_TYPE_STYLES,
     REL_TYPE_STYLES_WITH_EFFECTS,
     REL_TYPE_THEME,
+    REL_TYPE_SETTINGS,
+    REL_TYPE_NUMBERING,
+    REL_TYPE_FONT_TABLE,
+    REL_TYPE_WEB_SETTINGS,
+    REL_TYPE_FOOTNOTES,
+    REL_TYPE_ENDNOTES,
+    REL_TYPE_GLOSSARY_DOCUMENT,
 }
 
 CAPTION_NUMBER_RE = re.compile(r"^(figure|table)\s+\d+(\.\d+)*\s*", re.IGNORECASE)
@@ -1436,41 +1455,30 @@ class Builder:
         content_width_twips=None,
     ):
 
+        item_type = item.__class__.__name__.lower()
+
         if isinstance(item, FigureBlock):
 
             elements = []
 
             if item.caption_position == "before":
-                elements.extend(
-                    self._elements_for_xml(
-                        item.caption.xml,
-                        style_name=self._mapped_style_name(item.caption, style_mapper, item.caption.xml),
-                        style_alias_map=style_alias_map,
-                        apply_caption_numbering=True,
-                    )
+                elements.append(
+                    self._build_caption_element(item.caption, style_mapper, style_alias_map)
                 )
 
             for image in item.images:
-                elements.extend(
-                    self._elements_for_xml(
-                        image.xml,
-                        style_alias_map=style_alias_map,
-                    )
+                elements.append(
+                    self._build_image_element(image, style_mapper, style_alias_map)
                 )
 
             if item.caption_position == "after":
-                elements.extend(
-                    self._elements_for_xml(
-                        item.caption.xml,
-                        style_name=self._mapped_style_name(item.caption, style_mapper, item.caption.xml),
-                        style_alias_map=style_alias_map,
-                        apply_caption_numbering=True,
-                    )
+                elements.append(
+                    self._build_caption_element(item.caption, style_mapper, style_alias_map)
                 )
 
             return elements
 
-        if item.__class__.__name__.lower() == "table":
+        if item_type == "table":
             return self._build_table_elements(
                 item,
                 style_mapper,
@@ -1478,14 +1486,191 @@ class Builder:
                 content_width_twips=content_width_twips,
             )
 
-        is_caption = item.__class__.__name__.lower() == "caption"
+        if item_type == "caption":
+            return [self._build_caption_element(item, style_mapper, style_alias_map)]
 
+        if item_type == "formula":
+            return [self._build_formula_element(item, style_mapper, style_alias_map)]
+
+        if item_type in ("paragraph", "heading"):
+
+            if self._is_forbidden_text(item.text):
+                return []
+
+            style_name = self._mapped_style_name(item, style_mapper, item.xml)
+            style_id = self._resolve_style_id(style_name, style_alias_map)
+
+            return [
+                self._build_paragraph_element(
+                    item.text,
+                    item.runs,
+                    style_id,
+                    keep_with_next=item.keep_with_next,
+                )
+            ]
+
+        if item_type == "image":
+            return [self._build_image_element(item, style_mapper, style_alias_map)]
+
+        # Anything not yet modeled with a first-class semantic type (textboxes,
+        # unclassified raw blocks) falls back to a source-XML passthrough.
         return self._elements_for_xml(
             item.xml,
-            style_name=self._mapped_style_name(item, style_mapper, item.xml),
             style_alias_map=style_alias_map,
-            apply_caption_numbering=is_caption,
         )
+
+    def _build_run_element(self, run):
+
+        run_el = etree.Element(f"{W_NS}r")
+        rpr = etree.Element(f"{W_NS}rPr")
+
+        if run.bold:
+            etree.SubElement(rpr, f"{W_NS}b")
+
+        if run.italic:
+            etree.SubElement(rpr, f"{W_NS}i")
+
+        if run.underline:
+            underline = etree.SubElement(rpr, f"{W_NS}u")
+            underline.set(f"{W_NS}val", "single")
+
+        if len(rpr):
+            run_el.append(rpr)
+
+        t_node = etree.SubElement(run_el, f"{W_NS}t")
+        t_node.text = run.text
+        t_node.set(f"{XML_NS}space", "preserve")
+
+        if run.hyperlink_url:
+            hyperlink = etree.Element(f"{W_NS}hyperlink")
+            hyperlink.set(f"{R_NS}id", run.hyperlink_url)
+            hyperlink.append(run_el)
+            return hyperlink
+
+        return run_el
+
+    def _build_paragraph_element(self, text, runs, style_id, keep_with_next=False):
+
+        p = etree.Element(f"{W_NS}p")
+
+        if style_id or keep_with_next:
+            ppr = etree.SubElement(p, f"{W_NS}pPr")
+
+            if style_id:
+                pstyle = etree.SubElement(ppr, f"{W_NS}pStyle")
+                pstyle.set(f"{W_NS}val", style_id)
+
+            if keep_with_next:
+                etree.SubElement(ppr, f"{W_NS}keepNext")
+
+        effective_runs = runs if runs else ([Run(text=text)] if text else [])
+
+        for run in effective_runs:
+            p.append(self._build_run_element(run))
+
+        return p
+
+    def _build_formula_element(self, formula_item, style_mapper, style_alias_map):
+
+        # Formulas are content, never headings - a dedicated (monospaced,
+        # non-numbered, non-outline, non-TOC) style is applied regardless of
+        # whatever style/outline-level the source paragraph carried.
+        style_name = self._mapped_style_name(formula_item, style_mapper, formula_item.xml)
+        style_id = self._resolve_style_id(style_name, style_alias_map)
+
+        return self._build_paragraph_element(
+            formula_item.text,
+            formula_item.runs,
+            style_id,
+            keep_with_next=formula_item.keep_with_next,
+        )
+
+    def _build_caption_element(self, caption_item, style_mapper, style_alias_map):
+
+        style_name = self._mapped_style_name(caption_item, style_mapper, caption_item.xml)
+        style_id = self._resolve_style_id(style_name, style_alias_map)
+
+        p = etree.Element(f"{W_NS}p")
+
+        if style_id:
+            ppr = etree.SubElement(p, f"{W_NS}pPr")
+            pstyle = etree.SubElement(ppr, f"{W_NS}pStyle")
+            pstyle.set(f"{W_NS}val", style_id)
+
+        text = caption_item.text or ""
+        match = CAPTION_NUMBER_RE.match(text)
+
+        if match:
+
+            prefix = match.group(0)
+            remainder = text[len(prefix):]
+            label_match = re.match(r"(figure|table)", prefix, re.IGNORECASE)
+            number_match = re.search(r"\d+(\.\d+)*", prefix)
+
+            if label_match and number_match:
+                # Never carry over manually-typed caption numbers - always
+                # synthesize a live Word SEQ field so numbering stays correct.
+                label = label_match.group(1).capitalize()
+
+                # The matched prefix may have swallowed the whitespace that
+                # separated the number from the remainder text (e.g. "Table 6
+                # Overview") - restore a single separating space unless the
+                # remainder already starts with its own spacing/punctuation.
+                if remainder and remainder[0] not in (" ", ":", "."):
+                    remainder = " " + remainder
+
+                for run_el in self._build_caption_seq_field_runs(
+                    None,
+                    label=label,
+                    cached_number=number_match.group(0),
+                    remainder_text=remainder,
+                ):
+                    p.append(run_el)
+
+                return p
+
+        if text:
+            p.append(self._build_run_element(Run(text=text)))
+
+        return p
+
+    def _extract_drawing_nodes(self, xml_text):
+
+        element = etree.fromstring(xml_text.encode("utf-8"))
+
+        return element.xpath(
+            ".//*[local-name()='drawing']"
+            " | .//*[local-name()='object']"
+            " | .//*[local-name()='pict' and not(ancestor::*[local-name()='object'])]"
+        )
+
+    def _build_image_element(self, image_item, style_mapper, style_alias_map):
+
+        drawing_nodes = self._extract_drawing_nodes(image_item.xml)
+
+        p = etree.Element(f"{W_NS}p")
+        ppr = etree.SubElement(p, f"{W_NS}pPr")
+
+        jc = etree.SubElement(ppr, f"{W_NS}jc")
+        jc.set(f"{W_NS}val", "center")
+
+        for node in drawing_nodes:
+            run = etree.Element(f"{W_NS}r")
+            run.append(deepcopy(node))
+            p.append(run)
+
+        return p
+
+    def _is_forbidden_text(self, text):
+
+        forbidden_list = self.formatting_policy.get("forbidden_content", [])
+
+        if not forbidden_list or not text:
+            return False
+
+        normalized = text.strip().lower()
+
+        return any(phrase.lower() in normalized for phrase in forbidden_list)
 
     def _elements_for_xml(
         self,
@@ -1523,10 +1708,8 @@ class Builder:
                 # multilevel heading numbering, so it must never survive migration.
                 self._strip_direct_paragraph_numbering(element)
 
-            if apply_caption_numbering:
-                self._apply_caption_number_bold(element)
-
         return [deepcopy(element)]
+
 
     def _strip_embedded_section_break(self, element):
 
@@ -1584,133 +1767,128 @@ class Builder:
 
     def _build_table_elements(self, item, style_mapper, style_alias_map, content_width_twips=None):
 
-        element = etree.fromstring(item.xml.encode("utf-8"))
-
-        if self._is_forbidden_element(element):
+        if not item.cells:
             return []
+
+        if self._table_cells_are_forbidden(item):
+            return []
+
+        num_cols = max(
+            (sum(cell.col_span for cell in row) for row in item.cells),
+            default=0,
+        )
+
+        if num_cols == 0:
+            return []
+
+        table = etree.Element(f"{W_NS}tbl")
+        tblpr = etree.SubElement(table, f"{W_NS}tblPr")
 
         table_style_id = self._resolve_real_table_style_id(style_alias_map)
 
         if table_style_id:
-            self._set_table_style(element, table_style_id)
+            tblstyle = etree.SubElement(tblpr, f"{W_NS}tblStyle")
+            tblstyle.set(f"{W_NS}val", table_style_id)
 
-        self._ensure_table_look_banding(element)
-
-        # Source colors/borders/widths must never survive; the template style drives appearance.
-        self._strip_table_direct_formatting(element)
-        self._fit_table_width_to_page(element, content_width_twips)
-
-        if style_mapper is not None:
-            self._apply_table_cell_styles(element, style_mapper, style_alias_map)
-
-        return [deepcopy(element)]
-
-    def _strip_table_direct_formatting(self, table_element):
-
-        tblpr = table_element.find("w:tblPr", namespaces=NS)
-
-        if tblpr is not None:
-            for tag in ("w:tblBorders", "w:shd", "w:tblInd", "w:tblCellMar"):
-                node = tblpr.find(tag, namespaces=NS)
-                if node is not None:
-                    tblpr.remove(node)
-
-        for row in table_element.findall("w:tr", namespaces=NS):
-            for cell in row.findall("w:tc", namespaces=NS):
-                tcpr = cell.find("w:tcPr", namespaces=NS)
-
-                if tcpr is None:
-                    continue
-
-                for tag in ("w:shd", "w:tcBorders", "w:tcMar"):
-                    node = tcpr.find(tag, namespaces=NS)
-                    if node is not None:
-                        tcpr.remove(node)
-
-    def _fit_table_width_to_page(self, table_element, content_width_twips):
-
-        if not content_width_twips:
-            return
-
-        tblpr = table_element.find("w:tblPr", namespaces=NS)
-
-        if tblpr is None:
-            tblpr = etree.Element(f"{W_NS}tblPr")
-            table_element.insert(0, tblpr)
-
-        tblw = tblpr.find("w:tblW", namespaces=NS)
-
-        if tblw is None:
+        if content_width_twips:
             tblw = etree.SubElement(tblpr, f"{W_NS}tblW")
+            tblw.set(f"{W_NS}w", str(content_width_twips))
+            tblw.set(f"{W_NS}type", "dxa")
 
-        tblw.set(f"{W_NS}w", str(content_width_twips))
-        tblw.set(f"{W_NS}type", "dxa")
-
-        tbllayout = tblpr.find("w:tblLayout", namespaces=NS)
-
-        if tbllayout is None:
             tbllayout = etree.SubElement(tblpr, f"{W_NS}tblLayout")
+            tbllayout.set(f"{W_NS}type", "fixed")
 
-        tbllayout.set(f"{W_NS}type", "fixed")
+        self._ensure_table_look_banding(table)
 
-        grid = table_element.find("w:tblGrid", namespaces=NS)
-        columns = grid.findall("w:gridCol", namespaces=NS) if grid is not None else []
+        column_widths = self._distribute_column_widths(num_cols, content_width_twips)
 
-        if not columns:
-            return
+        grid = etree.SubElement(table, f"{W_NS}tblGrid")
 
-        original_widths = []
+        for width in column_widths:
+            gridcol = etree.SubElement(grid, f"{W_NS}gridCol")
+            if content_width_twips:
+                gridcol.set(f"{W_NS}w", str(width))
 
-        for col in columns:
-            try:
-                original_widths.append(int(col.get(f"{W_NS}w", "0")))
-            except ValueError:
-                original_widths.append(0)
+        for row_idx, row in enumerate(item.cells):
 
-        total_original = sum(original_widths) or 1
-
-        new_widths = [
-            max(round(width * content_width_twips / total_original), 1)
-            for width in original_widths
-        ]
-
-        # Correct rounding drift so columns sum exactly to the available width.
-        new_widths[-1] += content_width_twips - sum(new_widths)
-
-        for col, width in zip(columns, new_widths):
-            col.set(f"{W_NS}w", str(width))
-
-        for row in table_element.findall("w:tr", namespaces=NS):
-
+            tr = etree.SubElement(table, f"{W_NS}tr")
             col_idx = 0
 
-            for cell in row.findall("w:tc", namespaces=NS):
+            for cell in row:
 
-                tcpr = cell.find("w:tcPr", namespaces=NS)
-                span = 1
-
-                if tcpr is not None:
-                    gridspan = tcpr.find("w:gridSpan", namespaces=NS)
-                    if gridspan is not None:
-                        try:
-                            span = max(int(gridspan.get(f"{W_NS}val", "1")), 1)
-                        except ValueError:
-                            span = 1
-
-                cell_width = sum(new_widths[col_idx:col_idx + span])
+                span = max(cell.col_span, 1)
+                cell_width = (
+                    sum(column_widths[col_idx:col_idx + span])
+                    if content_width_twips
+                    else None
+                )
                 col_idx += span
 
-                if tcpr is None:
-                    tcpr = etree.Element(f"{W_NS}tcPr")
-                    cell.insert(0, tcpr)
+                tc = etree.SubElement(tr, f"{W_NS}tc")
+                tcpr = etree.SubElement(tc, f"{W_NS}tcPr")
 
-                tcw = tcpr.find("w:tcW", namespaces=NS)
-
-                if tcw is None:
+                if cell_width is not None:
                     tcw = etree.SubElement(tcpr, f"{W_NS}tcW")
+                    tcw.set(f"{W_NS}w", str(cell_width))
+                    tcw.set(f"{W_NS}type", "dxa")
 
-                tcw.set(f"{W_NS}w", str(cell_width))
-                tcw.set(f"{W_NS}type", "dxa")
+                if span > 1:
+                    gridspan = etree.SubElement(tcpr, f"{W_NS}gridSpan")
+                    gridspan.set(f"{W_NS}val", str(span))
+
+                alignment = "center" if cell.is_header else "left"
+                bold = any(run.bold for run in cell.runs)
+                italic = any(run.italic for run in cell.runs)
+
+                style_key = None
+
+                if style_mapper is not None:
+                    style_key = style_mapper.style_for_table_cell(
+                        is_header=cell.is_header,
+                        alignment=alignment,
+                        bold=bold,
+                        italic=italic,
+                    )
+
+                style_id = self._resolve_style_id(style_key, style_alias_map)
+
+                paragraph = self._build_paragraph_element(cell.text, cell.runs, style_id)
+
+                if cell.raw_xml:
+                    for node in self._extract_drawing_nodes(cell.raw_xml):
+                        run = etree.Element(f"{W_NS}r")
+                        run.append(deepcopy(node))
+                        paragraph.append(run)
+
+                tc.append(paragraph)
+
+        return [table]
+
+    def _distribute_column_widths(self, num_cols, content_width_twips):
+
+        if not content_width_twips or num_cols <= 0:
+            return [0] * num_cols
+
+        base_width = content_width_twips // num_cols
+        widths = [base_width] * num_cols
+        widths[-1] += content_width_twips - sum(widths)
+
+        return widths
+
+    def _table_cells_are_forbidden(self, item):
+
+        forbidden_list = self.formatting_policy.get("forbidden_content", [])
+
+        if not forbidden_list:
+            return False
+
+        combined_text = " ".join(
+            cell.text
+            for row in item.cells
+            for cell in row
+        ).lower()
+
+        return any(phrase.lower() in combined_text for phrase in forbidden_list)
 
     def _resolve_real_table_style_id(self, style_alias_map):
 
@@ -1745,163 +1923,9 @@ class Builder:
         look.set(f"{W_NS}noVBand", "1")
         look.set(f"{W_NS}val", "04A0")
 
-    def _apply_table_cell_styles(self, table_element, style_mapper, style_alias_map):
-
-        rows = table_element.findall("w:tr", namespaces=NS)
-
-        for row_idx, row in enumerate(rows):
-
-            is_header = row_idx == 0
-
-            for cell in row.findall("w:tc", namespaces=NS):
-                for paragraph in cell.findall(".//w:p", namespaces=NS):
-
-                    alignment = self._paragraph_alignment(paragraph)
-                    bold, italic = self._paragraph_has_bold_italic_run(paragraph)
-
-                    style_key = style_mapper.style_for_table_cell(
-                        is_header=is_header,
-                        alignment=alignment,
-                        bold=bold,
-                        italic=italic,
-                    )
-
-                    if not style_key:
-                        continue
-
-                    resolved = self._resolve_style_id(style_key, style_alias_map)
-
-                    if resolved:
-                        self._set_paragraph_style(paragraph, resolved)
-
-                    # Header/body cell text must use only the template style, never the source font/color.
-                    self._normalize_paragraph_formatting(paragraph, True)
-
-    def _paragraph_alignment(self, paragraph):
-
-        jc = paragraph.xpath("./w:pPr/w:jc/@w:val", namespaces=NS)
-
-        if jc and jc[0] in {"center", "both"}:
-            return "center"
-
-        return "left"
-
-    def _paragraph_has_bold_italic_run(self, paragraph):
-
-        bold = False
-        italic = False
-
-        for run in paragraph.findall(".//w:r", namespaces=NS):
-            rpr = run.find("w:rPr", namespaces=NS)
-
-            if rpr is None:
-                continue
-
-            if rpr.find("w:b", namespaces=NS) is not None:
-                bold = True
-
-            if rpr.find("w:i", namespaces=NS) is not None:
-                italic = True
-
-        return bold, italic
-
     # ------------------------------------------------------------------
     # Caption numbering
     # ------------------------------------------------------------------
-
-    def _apply_caption_number_bold(self, paragraph_element):
-
-        if self._paragraph_has_seq_field(paragraph_element):
-            # A real Word Caption/SEQ field already exists (source authored via
-            # Insert Caption) - preserve it exactly, only bold the label+field
-            # portion, never flatten it to static text.
-            self._bold_existing_caption_field(paragraph_element)
-            return
-
-        runs = paragraph_element.findall("w:r", namespaces=NS)
-
-        if not runs:
-            return
-
-        combined = "".join(
-            "".join(run.xpath(".//*[local-name()='t']/text()"))
-            for run in runs
-        )
-
-        match = CAPTION_NUMBER_RE.match(combined)
-
-        if not match:
-            return
-
-        prefix = match.group(0)
-        rest = combined[len(prefix):]
-
-        template_rpr = runs[0].find("w:rPr", namespaces=NS)
-        label_match = re.match(r"(figure|table)", prefix, re.IGNORECASE)
-        number_match = re.search(r"\d+(\.\d+)*", prefix)
-
-        for run in runs:
-            paragraph_element.remove(run)
-
-        if label_match and number_match:
-            # No pre-existing field - synthesize a real Word SEQ field so the
-            # caption number updates automatically instead of being static text.
-            label = label_match.group(1).capitalize()
-
-            for new_run in self._build_caption_seq_field_runs(
-                template_rpr,
-                label=label,
-                cached_number=number_match.group(0),
-                remainder_text=rest,
-            ):
-                paragraph_element.append(new_run)
-        else:
-            paragraph_element.append(self._make_caption_run(template_rpr, prefix, bold=True))
-
-            if rest:
-                paragraph_element.append(self._make_caption_run(template_rpr, rest, bold=False))
-
-    def _paragraph_has_seq_field(self, paragraph_element):
-
-        instr_texts = paragraph_element.xpath(".//w:instrText/text()", namespaces=NS)
-        return any("SEQ" in instr.upper() for instr in instr_texts)
-
-    def _bold_existing_caption_field(self, paragraph_element):
-
-        runs = paragraph_element.findall("w:r", namespaces=NS)
-        end_index = None
-
-        for idx, run in enumerate(runs):
-            fldchar = run.find("w:fldChar", namespaces=NS)
-
-            if fldchar is not None and fldchar.get(f"{W_NS}fldCharType") == "end":
-                end_index = idx
-                break
-
-        if end_index is None:
-            return
-
-        for run in runs[: end_index + 1]:
-            self._set_run_bold(run, True)
-
-        for run in runs[end_index + 1 :]:
-            self._set_run_bold(run, False)
-
-    def _set_run_bold(self, run, bold):
-
-        rpr = run.find("w:rPr", namespaces=NS)
-
-        if rpr is None:
-            rpr = etree.Element(f"{W_NS}rPr")
-            run.insert(0, rpr)
-
-        existing_bold = rpr.find("w:b", namespaces=NS)
-
-        if bold:
-            if existing_bold is None:
-                etree.SubElement(rpr, f"{W_NS}b")
-        elif existing_bold is not None:
-            rpr.remove(existing_bold)
 
     def _build_caption_seq_field_runs(self, template_rpr, label, cached_number, remainder_text):
 
@@ -1953,27 +1977,6 @@ class Builder:
             runs.append(make_text_run(remainder_text, bold=False))
 
         return runs
-
-    def _make_caption_run(self, template_rpr, text, bold):
-
-        run = etree.Element(f"{W_NS}r")
-        rpr = deepcopy(template_rpr) if template_rpr is not None else etree.Element(f"{W_NS}rPr")
-
-        existing_bold = rpr.find("w:b", namespaces=NS)
-
-        if bold:
-            if existing_bold is None:
-                etree.SubElement(rpr, f"{W_NS}b")
-        elif existing_bold is not None:
-            rpr.remove(existing_bold)
-
-        run.append(rpr)
-
-        t_node = etree.SubElement(run, f"{W_NS}t")
-        t_node.text = text
-        t_node.set(f"{XML_NS}space", "preserve")
-
-        return run
 
     # ------------------------------------------------------------------
     # Paragraph / table style application

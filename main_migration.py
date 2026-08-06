@@ -2,13 +2,13 @@ import argparse
 from pathlib import Path
 import json
 
-from builder import Builder
-from branding import BrandingEngine
-from document_types import DocumentType
-from extractor import Extractor
-from style_engine.style_mapper import StyleMapper
-from template_manager import TemplateManager
-from validator import validate
+from docx_migration.builder import Builder
+from docx_migration.branding import BrandingEngine
+from docx_migration.document_types import DocumentType
+from docx_migration.extractor import Extractor
+from docx_migration.style_engine.style_mapper import StyleMapper
+from docx_migration.template_manager import TemplateManager
+from docx_migration.validator import validate
 
 
 DEFAULT_SOURCE = "samples/real_ams.docx"

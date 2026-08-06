@@ -7,7 +7,7 @@ from docx import Document
 from docx.enum.section import WD_ORIENT
 from lxml import etree
 
-from models import (
+from .models import (
     Caption,
     Cell,
     DocumentModel,
@@ -84,20 +84,12 @@ class Extractor:
             document
         )
 
-        media_dir = Path(
-            "extracted_images"
-        )
-        media_dir.mkdir(
-            exist_ok=True
-        )
-
         with ZipFile(
             self.docx_path
         ) as archive:
 
             image_paths = self._extract_media_files(
                 archive,
-                media_dir,
             )
 
             rid_to_target = self._extract_relationships(
@@ -289,7 +281,6 @@ class Extractor:
     def _extract_media_files(
         self,
         archive,
-        media_dir,
     ):
 
         image_paths = {}
@@ -305,27 +296,11 @@ class Extractor:
                 media_file
             ).name
 
-            image_path = (
-                media_dir /
-                image_name
-            )
-
-            with archive.open(
-                media_file
-            ) as src:
-
-                with open(
-                    image_path,
-                    "wb",
-                ) as dst:
-
-                    dst.write(
-                        src.read()
-                    )
-
+            # No disk write here - builder.py copies image bytes
+            # straight from the source zip; this is just a name->archive-path lookup.
             image_paths[
                 image_name
-            ] = str(image_path)
+            ] = media_file
 
         return image_paths
 

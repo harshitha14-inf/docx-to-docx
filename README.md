@@ -13,27 +13,31 @@ Enterprise-style DOCX migration framework.
 
 ## Project Structure
 
-docx-migration-v7/
+docx-migration/
 
-- analyser.py
-- extractor.py
-- builder.py
-- validator.py
-- models.py
-- test_roundtrip.py
-- samples/
+- docx_migration/ - core package (models, extractor, builder, validator, branding, template_manager, style_engine)
+- config/ - document type rules, style maps, formatting/acceptance policy
+- templates/ - production templates + reference/ source templates
+- scripts/ - standalone dev tools (analyser.py, compare.py)
+- tests/ - test_roundtrip.py
+- samples/ - sample input/output documents
+- main_migration.py - CLI entry point
 
 ## Installation
 
 pip install -r requirements.txt
 
+## Run Migration
+
+python main_migration.py --source samples/file.docx --output samples/output.docx --document-type datasheet
+
 ## Analyse Document
 
-python analyser.py samples/file.docx
+python scripts/analyser.py samples/file.docx
 
 ## Round Trip Test
 
-python test_roundtrip.py
+python tests/test_roundtrip.py
 
 ## Current Status
 

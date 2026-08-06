@@ -1,6 +1,6 @@
 import json
 
-from validator import Validator
+from docx_migration.validator import Validator
 
 import sys
 

@@ -10,7 +10,7 @@ from docx import Document
 from docx.enum.section import WD_ORIENT
 from lxml import etree
 
-from style_engine.style_mapper import StyleMapper
+from .style_engine.style_mapper import StyleMapper
 
 
 CAPTION_RE = re.compile(

@@ -1,7 +1,7 @@
 from pathlib import Path
 import json
 
-from document_types import DocumentType
+from .document_types import DocumentType
 
 
 class TemplateNotFoundError(FileNotFoundError):
@@ -11,7 +11,7 @@ class TemplateNotFoundError(FileNotFoundError):
 class TemplateManager:
 
     def __init__(self, project_root=None):
-        self.project_root = Path(project_root or Path(__file__).resolve().parent)
+        self.project_root = Path(project_root or Path(__file__).resolve().parent.parent)
         self.rules = self._load_rules()
 
     def get_template(self, document_type):

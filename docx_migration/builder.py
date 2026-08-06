@@ -7,9 +7,9 @@ from zipfile import ZipFile
 
 from lxml import etree
 
-from models import FigureBlock, Formula, Run
-from style_engine.style_mapper import StyleMapper
-from template_manager import TemplateManager
+from .models import FigureBlock, Formula, Run
+from .style_engine.style_mapper import StyleMapper
+from .template_manager import TemplateManager
 
 
 NS = {
@@ -78,7 +78,7 @@ class Builder:
         formatting_policy=None,
     ):
 
-        self.project_root = Path(project_root or Path(__file__).resolve().parent)
+        self.project_root = Path(project_root or Path(__file__).resolve().parent.parent)
         self.template_manager = template_manager or TemplateManager(self.project_root)
         self.style_mapper = style_mapper
         self.formatting_policy = formatting_policy or self._load_formatting_policy()

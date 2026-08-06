@@ -11,7 +11,7 @@ from template_manager import TemplateManager
 from validator import validate
 
 
-DEFAULT_SOURCE = "samples/real_ams.docx"
+DEFAULT_SOURCE = "samples/sample2.docx"
 DEFAULT_OUTPUT = "samples/roundtrip_output.docx"
 
 
